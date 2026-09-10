@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.3.1"
+__version__ = "2.3.2"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -764,6 +764,49 @@ def run_cmd(cmd, timeout=60, shell=False, retries=0):
         if rc != 0:
             log.warning(f"sync hata: {cmd_text[:120]} rc={rc} {dur:.1f}s retry={attempt}")
         return out, rc
+
+
+def rclone_read(args, timeout=180):
+    """rclone OKUMA çağrısı — geçici hatada 1 retry (3s), tanı log'u run_cmd ile aynı.
+
+    Neden ayrı yardımcı: subprocess.run ile doğrudan yapılan okumalar (lsf/lsjson)
+    run_cmd'in retry politikasını atlıyordu; ayrıca çağırıcılar stderr'i kullanıcı
+    mesajında kullandığı için run_cmd'in (out, rc) dönüşü yetersiz. Bu yardımcı
+    politikayı YENİDEN YAZMAZ — _is_idempotent_read() ve _is_transient_rc() tek
+    kaynaktır; retry koşulu, bekleme süresi (3s) ve log biçimi run_cmd ile aynıdır.
+
+    Güvenlik: yazma alt-komutu (copy/copyto/move/sync/delete/...) verilirse
+    ValueError — çift yazma/kısmi durum riski fail-closed engellenir.
+
+    timeout varsayılanı 180s (v2.1 spec: tüm okumalar 180s altında).
+    Dönüş: (rc, stdout, stderr) — 'uzakta yok' ile 'gerçek hata' ayrımı çağırıcıda.
+    """
+    if not _is_idempotent_read(shlex.join(["rclone", *map(str, args)])):
+        raise ValueError(
+            f"rclone_read yalnız idempotent OKUMA komutları içindir: "
+            f"{shlex.join(map(str, args))[:120]}")
+    cmd_text = shlex.join(["rclone", *map(str, args)])
+    retries = 1
+    rc, out, err = -1, "", ""
+    for attempt in range(retries + 1):
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run(["rclone", *args], capture_output=True, text=True,
+                               errors="replace", timeout=timeout)
+            rc, out, err = r.returncode, r.stdout or "", r.stderr or ""
+        except subprocess.TimeoutExpired:
+            rc, out, err = -1, "", f"TIMEOUT {timeout}s"
+        except Exception as e:
+            rc, out, err = -1, "", str(e)
+        dur = time.monotonic() - t0
+        if rc == 0:
+            return rc, out, err
+        if attempt < retries and _is_transient_rc(rc, err):
+            log.warning(f"sync hata: {cmd_text[:120]} rc={rc} {dur:.1f}s retry={attempt + 1}/{retries}")
+            time.sleep(3)
+            continue
+        log.warning(f"sync hata: {cmd_text[:120]} rc={rc} {dur:.1f}s retry={attempt}")
+        return rc, out, err
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2617,13 +2660,11 @@ def cmd_backup(cfg, node=None, hub=None, dry_run=False):
                 # C modülü (v2.1): upload sonrası SHA doğrulama —
                 # GDrive'daki hash'i çek, yerel sha ile karşılaştır.
                 verified = False
-                rr = subprocess.run(["rclone", "lsjson",
-                                     f"{hub}/{n}", "--hash", "--files-only"],
-                                    capture_output=True, text=True,
-                                    errors="replace", timeout=180)
-                if rr.returncode == 0:
+                rc_ls, out_ls, _err_ls = rclone_read(
+                    ["lsjson", f"{hub}/{n}", "--hash", "--files-only"], timeout=180)
+                if rc_ls == 0:
                     try:
-                        for f in json.loads(rr.stdout or "[]"):
+                        for f in json.loads(out_ls or "[]"):
                             if f.get("Path") == os.path.basename(tarp):
                                 verified = (f.get("Hash", "") == sha)
                                 break
@@ -2681,12 +2722,12 @@ def cmd_versions(cfg, node=None, hub=None, tag=None, diff=None):
     hub = _hub_base(hub)
     nodes = [node] if node else list(cfg["dirs"].keys())
     for n in nodes:
-        r = subprocess.run(["rclone", "lsf", f"{hub}/{n}", "--files-only"],
-                           capture_output=True, text=True, errors="replace")
-        if r.returncode != 0:
-            print(f"    ❌ {n}: versiyon listesi okunamadı: {r.stderr.strip()[:120]}")
+        rc_v, out_v, err_v = rclone_read(["lsf", f"{hub}/{n}", "--files-only"],
+                                         timeout=180)
+        if rc_v != 0:
+            print(f"    ❌ {n}: versiyon listesi okunamadı: {err_v.strip()[:120]}")
             return 1
-        vers = [f for f in r.stdout.splitlines() if f.endswith(".tar.gz")]
+        vers = [f for f in (out_v or "").splitlines() if f.endswith(".tar.gz")]
         if tag:
             rc = _tag_version(cfg, n, tag, vers, hub=hub)
             if rc != 0:
@@ -2717,24 +2758,22 @@ def _tag_version(cfg, node, tag, vers, hub=None):
     tags_dir = f"{hub}/{node}/tags"
     tag_file = f"{tags_dir}/{tag}.txt"
     # aynı tag var mı? (lsf hatası → RED, fail-open değil — OceanAPI #5)
-    r = subprocess.run(["rclone", "lsf", tags_dir, "--files-only"],
-                       capture_output=True, text=True, errors="replace")
-    if r.returncode != 0:
-        print(f"    ❌ {node}: tag listesi okunamadı: {r.stderr.strip()[:120]}")
+    rc_t, out_t, err_t = rclone_read(["lsf", tags_dir, "--files-only"], timeout=180)
+    if rc_t != 0:
+        print(f"    ❌ {node}: tag listesi okunamadı: {err_t.strip()[:120]}")
         return 1
-    if f"{tag}.txt" in (r.stdout or "").splitlines():
+    if f"{tag}.txt" in (out_t or "").splitlines():
         print(f"    ⛔ {node}: tag '{tag}' zaten var (RED — üzerine yazılmaz)")
         return 1
     latest = vers[-1]
     # Uzak hash — GDrive için genelde MD5 olabilir; 'sha256' DEĞİL,
     # 'remote_hash' olarak etiketlenir (OceanAPI #10).
-    rr = subprocess.run(["rclone", "lsjson", f"{hub}/{node}", "--hash",
-                         "--files-only"],
-                        capture_output=True, text=True, errors="replace")
+    rc_h, out_h, _err_h = rclone_read(
+        ["lsjson", f"{hub}/{node}", "--hash", "--files-only"], timeout=180)
     sha = ""
-    if rr.returncode == 0:
+    if rc_h == 0:
         try:
-            for f in json.loads(rr.stdout or "[]"):
+            for f in json.loads(out_h or "[]"):
                 if f.get("Path") == latest:
                     sha = f.get("Hash", "")
                     break
@@ -2961,15 +3000,13 @@ def memory_pull_import(cfg, memory_dir, dry_run=False):
     if dry_run:
         print(f"    [DRY] pull+import deltas from {hub}")
         return 0
-    r = subprocess.run(["rclone", "lsf", hub, "--files-only"],
-                       capture_output=True, text=True, errors="replace",
-                       timeout=90)
-    if r.returncode != 0:
+    rc_m, out_m, err_m = rclone_read(["lsf", hub, "--files-only"], timeout=180)
+    if rc_m != 0:
         # 29 Ağu FIX (OceanAPI #8): -1 = HARD hata — cmd_memory rc=1 döner,
-        # cron görür; hub geçici kapalıysa retry şansı verir.
-        print(f"    ❌ hub listelenemedi: {r.stderr.strip()[:120]}")
+        # cron görür; v2.1.2: okuma retry'si (1×/3s) bu çağrıda da geçerli.
+        print(f"    ❌ hub listelenemedi: {err_m.strip()[:120]}")
         return -1
-    deltas = [f for f in (r.stdout or "").splitlines()
+    deltas = [f for f in (out_m or "").splitlines()
               if f.endswith(".jsonl")]
     total_applied = total_conflicts = total_tomb = 0
     for fn in sorted(deltas):

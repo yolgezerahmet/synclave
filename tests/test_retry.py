@@ -9,6 +9,8 @@ Kapsam:
 """
 import json
 import os
+import re
+import subprocess
 import sys
 import types
 import time
@@ -322,3 +324,121 @@ def test_no_pipeline_in_gdrive_reads_source_guard():
     assert "rclone lsd" in src
     assert "2>/dev/null | wc -l" not in src
     assert "2>/dev/null | tail -1" not in src
+
+
+# ─── v2.1.2: rclone_read — doğrudan subprocess OKUMALARI retry kapsamında ──
+
+def _patch_subprocess(monkeypatch, mod, fake):
+    """mod.subprocess'i sahte run + gerçek TimeoutExpired ile değiştir."""
+    monkeypatch.setattr(mod, "subprocess",
+                        types.SimpleNamespace(run=fake,
+                                              TimeoutExpired=subprocess.TimeoutExpired))
+
+
+def test_rclone_read_retry_success(monkeypatch, no_sleep):
+    """Geçici hata (connection reset) → 1 retry (3s) → başarı."""
+    calls = []
+    fake = _make_fake_run([(1, "", "connection reset"), (0, "20260901.tar.gz\n", "")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    rc, out, err = sm.rclone_read(["lsf", "gdrive:hub/scripts", "--files-only"])
+    assert rc == 0
+    assert "20260901.tar.gz" in out
+    assert len(calls) == 2                     # hata → retry → başarı
+    assert calls[0][:2] == ["rclone", "lsf"]   # gerçek rclone komutu
+
+
+def test_rclone_read_default_timeout_180_and_passed_through(monkeypatch, no_sleep):
+    """Varsayılan timeout 180s (spec) ve subprocess'e gerçekten geçirilir."""
+    import inspect
+    assert inspect.signature(sm.rclone_read).parameters["timeout"].default == 180
+    seen = {}
+
+    def fake_run(cmd_args, capture_output=True, text=True, errors="replace",
+                 timeout=60, **kw):
+        seen["timeout"] = timeout
+        return _FakeResult(0, "ok\n", "")
+
+    _patch_subprocess(monkeypatch, sm, fake_run)
+    rc, out, _ = sm.rclone_read(["lsf", "gdrive:hub/x", "--files-only"])
+    assert rc == 0 and seen["timeout"] == 180
+
+
+def test_rclone_read_retry_then_fail_keeps_rc_and_stderr(monkeypatch, no_sleep, caplog):
+    """İki deneme de 5xx → rc!=0 döner, stderr korunur (fail-closed), 2 çağrı."""
+    calls = []
+    fake = _make_fake_run([(1, "", "HTTP 503 Service Unavailable"),
+                           (1, "", "HTTP 503 Service Unavailable")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    with caplog.at_level("WARNING"):
+        rc, out, err = sm.rclone_read(["lsjson", "gdrive:hub/x", "--hash"])
+    assert rc == 1 and len(calls) == 2         # yalnız 1 retry
+    assert "HTTP 503" in err                   # stderr kaybolmaz (çağırıcı basar)
+    assert any("sync hata:" in r.message and "rc=1" in r.message
+               and "retry=1/1" in r.message for r in caplog.records)
+
+
+def test_rclone_read_permanent_error_no_retry(monkeypatch, no_sleep):
+    """Kalıcı hata (yok/permission denied) → retry YOK, tek çağrı."""
+    calls = []
+    fake = _make_fake_run([(1, "", "no such file or directory")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    rc, out, err = sm.rclone_read(["lsf", "gdrive:hub/yok"])
+    assert rc == 1 and len(calls) == 1
+    assert "no such file" in err
+
+
+def test_rclone_read_timeout_is_transient_and_retries(monkeypatch, no_sleep):
+    """Timeout → geçici sayılır (retry), ikinci deneme başarılıysa rc=0."""
+    calls = []
+
+    def fake_run(cmd_args, capture_output=True, text=True, errors="replace",
+                 timeout=60, **kw):
+        calls.append(list(cmd_args))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd_args, timeout)
+        return _FakeResult(0, "ok\n", "")
+
+    _patch_subprocess(monkeypatch, sm, fake_run)
+    rc, out, err = sm.rclone_read(["lsf", "gdrive:hub/z"])
+    assert rc == 0 and len(calls) == 2
+
+
+def test_rclone_read_write_verb_rejected(monkeypatch, no_sleep):
+    """YAZMA komutu rclone_read'a verilirse ValueError — çift yazma fail-closed."""
+    calls = []
+    fake = _make_fake_run([(0, "", "")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    for args in (["copyto", "a.tar.gz", "gdrive:hub/n/a.tar.gz"],
+                 ["copy", "/tmp/dir", "gdrive:hub"],
+                 ["sync", "/tmp/dir", "gdrive:hub"],
+                 ["delete", "gdrive:hub/x"],
+                 ["copy", "status", "gdrive:hub/dest"]):   # okuma-benzeri ad tuzağı
+        with pytest.raises(ValueError):
+            sm.rclone_read(args)
+    assert calls == []          # hiç subprocess çağrısı yapılmadı
+
+
+def test_direct_rclone_reads_source_guard():
+    """Regresyon kapısı: sync_motor'da doğrudan subprocess ile rclone OKUMASI kalamaz.
+
+    Tüm okuma çağrıları rclone_read (retry'li) üzerinden geçer; subprocess.run
+    ile kalan çağrılar yalnız YAZMA alt-komutları olabilir.
+    """
+    src = Path(sm.__file__).read_text(encoding="utf-8")
+    verbs = re.findall(r'subprocess\.run\(\s*\[\s*["\']rclone["\']\s*,\s*["\']([a-z]+)["\']',
+                       src)
+    assert verbs, "rclone çağrı taraması eşleşme bulamadı (regex bayat)"
+    allowed_writes = set(sm._RETRY_WRITE_TOKENS) | {"mkdir", "touch"}
+    leftover_reads = sorted(set(verbs) - allowed_writes)
+    assert not leftover_reads, f"doğrudan subprocess ile OKUMA kaldı: {leftover_reads}"
+    # okuma yardımcısı gerçekten kullanılıyor (1 tanım + >=5 çağrı yeri)
+    assert len(re.findall(r"rclone_read\(", src)) >= 6
+
+
+def test_rclone_read_only_read_tokens_accepted():
+    """Politika kaynağı _RETRY_READ_TOKENS: okuma sözcükleri kabul, yazma red."""
+    for args in (["lsf", "gdrive:hub"], ["lsjson", "gdrive:hub", "--hash"],
+                 ["lsd", "gdrive:hub"], ["cat", "gdrive:hub/f.json"]):
+        assert sm._is_idempotent_read(" ".join(["rclone"] + args))
+    for args in (["copyto", "a", "b"], ["copy", "a", "b"], ["mkdir", "gdrive:hub/x"]):
+        assert not sm._is_idempotent_read(" ".join(["rclone"] + args))

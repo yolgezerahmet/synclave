@@ -1,5 +1,27 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.3.2] — 2026-09-10 (rclone OKUMA retry kapsamı tamamlandı)
+
+- **Kapatan modül (GÖREV 1 artığı):** `sync_motor.py` içinde `subprocess.run`
+  ile doğrudan yapılan 5 rclone **okuma** çağrısı (`lsjson --hash`,
+  `lsf` ×3, ortak-hafıza `lsf`) `run_cmd`'in retry politikasını atlıyordu;
+  `cmd_memory` okuması ayrıca 90s timeout ile spec'in (180s) dışındaydı.
+- **Yeni yardımcı `rclone_read(args, timeout=180)`:** politika tekrarı YOK —
+  `_is_idempotent_read()` + `_is_transient_rc()` yeniden kullanılır; geçici
+  hata (timeout/network/HTTP 5xx) → 1 retry (3s). Log biçimi `run_cmd` ile
+  aynı: `sync hata: <komut> rc=<rc> <süre>s retry=<n>`. Dönüş `(rc, out, err)`
+  — çağırıcıların stderr tabanlı kullanıcı mesajı korunur, "uzakta yok"
+  ayrımı bozulmaz (fail-closed).
+- **Yazma güvenliği:** `rclone_read` yazma alt-komutu (copy/copyto/move/sync/
+  delete/…) ile çağrılırsa `ValueError` — çift yazma/kısmi durum engellenir.
+  Yazma çağrıları (`copyto`/`copy`) doğrudan `subprocess.run` ile kalır; onlara
+  retry EKLENMEZ.
+- **Regresyon kapısı (`tests/test_retry.py`, +8 test):** kaynak taramasıyla
+  `subprocess.run(["rclone", "<verb>"])` içinde yalnız YAZMA verb'lerine izin
+  verilir (okuma geri sızarsa test kırmızı); retry/başarı, kalıcı hatada retry
+  yok, timeout→retry, yazma reddi ve 180s varsayılanı ayrıca kilitlenir.
+- Test: 205 PASS (`python3 -m pytest tests/`).
+
 ## [1.0.0] — 2026-08-30 (REBRAND: hermes-sync → Synclave)
 
 - Yeni isim: **Synclave** (sync + enclave — sifreli guvenli bolge)
