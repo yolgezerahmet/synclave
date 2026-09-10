@@ -139,3 +139,35 @@ def test_flat_copy_has_same_secret_patterns():
         f"desenlerle çalışır.\nflat: {flat_block!r}\npkg : {pkg_block!r}")
     for bad in ("[", "]", "{", "}", "*", "+"):
         assert bad not in flat_block, f"kök kopyada ölü desen: '{bad}'"
+
+
+# ─── ADAY AD VARYANTI KAPISI ────────────────────────────────────
+# Bulunan 2. gerçek hata: içerik taraması YALNIZCA tam ada bakıyordu, bu yüzden
+# 'config.prod.json' / 'settings.local.yaml' gibi varyantlar hiç taranmıyor ve
+# içindeki canlı anahtarla birlikte manifest'e giriyordu (canlı doğrulandı).
+
+@pytest.mark.parametrize("name", ["config.prod.json", "config.local.json",
+                                 "config.backup.json", "settings.local.yaml",
+                                 "settings.prod.yml", "tokens.old.db",
+                                 "credentials.prod.txt", "secrets.bak.txt"])
+def test_candidate_name_variants_are_scanned(tmp_path, name):
+    """Ad varyantları da taranmalı — yoksa anahtar sızması kaçış yolu kalır."""
+    body = REAL_KEYS["aws"] if name.endswith((".json", ".yaml", ".yml")) else REAL_KEYS["openai_sk"]
+    (tmp_path / name).write_bytes(body + b"\n")
+    inv = _scan(tmp_path)
+    assert inv == {}, f"ad varyantı taranmadı: {name} -> {list(inv)}"
+
+
+def test_variant_of_non_candidate_name_still_not_scanned(tmp_path):
+    """Aday OLMAYAN adların varyantı da taranmaz (kapsam dar kalmalı)."""
+    (tmp_path / "notes.prod.md").write_bytes(b"sk-abcdefghijklmnopqrstuvwxyz\n")
+    (tmp_path / "report.final.txt").write_bytes(b"AKIAIOSFODNN7EXAMPLE\n")
+    inv = _scan(tmp_path)
+    assert "t/notes.prod.md" in inv and "t/report.final.txt" in inv, f"kapsam kaydı: {inv}"
+
+
+def test_clean_variant_candidate_still_included(tmp_path):
+    """Regresyon: temiz 'config.prod.json' elenmemeli (aşırı-blok yok)."""
+    (tmp_path / "config.prod.json").write_text('{"node": "h2", "enabled": true}')
+    inv = _scan(tmp_path)
+    assert "t/config.prod.json" in inv, f"temiz varyant elendi: {inv}"

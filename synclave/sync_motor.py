@@ -497,10 +497,25 @@ def scan_directory(label, dir_cfg):
             return True
         return False
 
+    def is_scan_candidate(base_name):
+        """Aday ad eşleşmesi: tam ad VEYA varyant (config.prod.json -> config.json).
+
+        NEDEN: yalnızca tam-ad eşleşmesi bir KAÇIŞ YOLUYDU — 'config.prod.json'
+        ve 'settings.local.yaml' hiç taranmadan manifest'e giriyordu (canlı
+        doğrulandı, bkz. tests/test_secret_scan.py). Varyantlar da taranır;
+        tarama yine yalnızca aday adlara uygulanır (≤64KB okuma, ihmal edilebilir).
+        """
+        if base_name in CONTENT_SCAN_NAMES:
+            return True
+        stem, ext = os.path.splitext(base_name)
+        if not ext:
+            return False
+        return f"{stem.split('.')[0]}{ext}" in CONTENT_SCAN_NAMES
+
     def content_scan(fpath, fname):
         """Yalnızca riskli aday isimlerinde içerik taraması (performans korunur)."""
         base_name = os.path.basename(fname).lower()
-        if base_name not in CONTENT_SCAN_NAMES:
+        if not is_scan_candidate(base_name):
             return False
         try:
             with open(fpath, "rb") as f:
