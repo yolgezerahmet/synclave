@@ -622,7 +622,8 @@ def gh_available():
 # run_cmd'de retry YALNIZCA idempotent OKUMA komutlarına uygulanır
 # (cat/lsf/lsjson/lsd/status). Yazma komutlarına (copy/copyto/backup)
 # ASLA retry YOK — çift yazma/kısmi durum fail-closed korunur.
-_RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping"}
+_RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
+                      "listremotes", "direxists", "about"}
 # Yazma alt-komutları — dosya adı okuma kelimesine benzese bile (örn.
 # 'rclone copy status <dest>') asla retry açılmaz (çift yazma fail-closed).
 _RETRY_WRITE_TOKENS = {
@@ -672,6 +673,28 @@ def _is_transient_rc(rc: int, err: str) -> bool:
     if re.search(r"\b5\d\d\b", e):
         return True
     return any(m in e for m in _RETRY_TRANSIENT)
+
+
+def _lsd_names(out: str) -> list:
+    """rclone lsd çıktısından dizin adlarını ayıkla (her satırın son token'ı).
+
+    Pipeline'sız kullanım için: `| tail -1` / `| wc -l` yerine burada parse
+    edilir — böylece rc GERÇEK rclone rc'si olur ve retry tetiklenebilir
+    (Windows cmd.exe'de pipefail yok, CRLF ve boş satırlar tolere edilir).
+    'Name' başlığı (lsjson tarzı çıktı) dizin adı sayılmaz.
+    """
+    names = []
+    for ln in (out or "").splitlines():          # splitlines CRLF'i de böler
+        toks = ln.split()
+        if len(toks) < 2:
+            continue
+        # rclone lsd biçimi: "<boyut> <tarih> <saat> <boyut> <ad...>" — ad 4.
+        # alandan sonra başlar ve boşluk içerebilir (son token almak adı
+        # kırpardı — QCode denetimi #3).
+        name = " ".join(toks[4:]) if len(toks) >= 5 else toks[-1]
+        if name and name.lower() != "name":
+            names.append(name)
+    return names
 
 
 def run_cmd(cmd, timeout=60, shell=False, retries=0):
@@ -1446,9 +1469,9 @@ def cmd_nodes(cfg):
         ver_count = "?"
         if gd and rclone_available():
             out, rc = run_cmd(
-                f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{label} '
-                f'2>/dev/null | wc -l', timeout=30, shell=True)
-            ver_count = out.strip() if rc == 0 else "?"
+                f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{label}',
+                timeout=30, retries=1)
+            ver_count = str(len(_lsd_names(out))) if rc == 0 else "?"
         print(f"  {'🟢' if exists else '🔴'} {label:12s} "
               f"{'GDrive:'+str(ver_count)+' ver' if gd else 'lokal'}")
     print()
@@ -1535,15 +1558,22 @@ def gdrive_pull_latest(cfg, node):
         log.warning("rclone yok — GDrive pull atlandı")
         return False
 
-    # En son versiyon klasörünü bul
+    # En son versiyon klasörünü bul — pipeline YOK: rc GERÇEK rclone rc'si.
+    # (Eski `| tail -1` rc'yi tail'den alıyordu → retry hiç tetiklenmiyor ve
+    #  ağ hatası 'versiyon yok' gibi görünüyordu — v2.1.2 düzeltmesi.)
     out, rc = run_cmd(
-        f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{node} '
-        f'2>/dev/null | tail -1', timeout=30, shell=True)
-    if rc != 0 or not out:
+        f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{node}',
+        timeout=30, retries=1)
+    if rc != 0:
+        log.warning(f"{node}: GDrive versiyon listesi alınamadı "
+                    f"(rc={rc}, retry sonrası — pull atlandı)")
+        return False
+    names = _lsd_names(out)
+    if not names:
         log.info(f"{node}: ⚠ GDrive'da versiyon yok (pull atlandı — node yedeklenmemiş)")
         return False
     # En son timestamp klasörü
-    latest = out.split()[-1]
+    latest = names[-1]
     if not latest or not latest.replace("_", "").isdigit():
         log.warning(f"{node}: geçersiz versiyon klasörü: {latest}")
         return False
@@ -1957,8 +1987,10 @@ def cmd_doctor(cfg):
                 ok = False
 
     # 3. GDrive remote
-    out, rc = run_cmd("rclone listremotes", timeout=30, shell=True)
-    gdrive = "gdrive:" in (out or "")
+    out, rc = run_cmd("rclone listremotes", timeout=30, retries=1)
+    # rc==0 şartı (QCode denetimi #2): yarıda kesilen rclone stdout'a yazsa
+    # bile 'tanımlı' denmez — fail-closed tanı.
+    gdrive = rc == 0 and "gdrive:" in (out or "")
     print(f"\n  {'✅' if gdrive else '❌'} GDrive remote (rclone): "
           f"{'tanımlı' if gdrive else 'YOK'}")
     if not gdrive:

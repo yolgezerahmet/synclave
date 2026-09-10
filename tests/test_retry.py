@@ -217,3 +217,108 @@ def test_is_transient_classification():
     assert not ck._is_transient_rclone_error(1, "not found")
     assert not ck._is_transient_rclone_error(1, "invalid object name")
     assert not ck._is_transient_rclone_error(-1, "rclone: command not found")
+
+
+# ─── v2.1.2: pipeline'sız GDrive okuma + GERÇEK rc + retry bağlama ─────
+# Kapanan açık: `rclone lsd ... | tail -1` / `| wc -l` rc'yi tail/wc'den
+# alıyordu → retry hiç tetiklenmiyor ve ağ hatası 'versiyon yok' gibi
+# görünüyordu. Artık çıktı yerel parse edilir, rc gerçek rclone rc'sidir.
+
+def test_lsd_names_parses_crlf_skips_blank_and_header():
+    out = ("          -1 2026-09-01 13:27:04        -1 20260901_132704\r\n"
+           "\r\n"
+           "          -1 2026-09-02 01:39:11        -1 20260902_013911\r\n"
+           "    -1 -1 -1 Name\n")
+    assert sm._lsd_names(out) == ["20260901_132704", "20260902_013911"]
+
+
+def test_lsd_names_empty_and_garbage():
+    assert sm._lsd_names("") == []
+    assert sm._lsd_names(None) == []
+    assert sm._lsd_names("tek_token\n") == []          # tek token ad sayılmaz
+    assert sm._lsd_names("   \n \t \n") == []
+
+
+def test_lsd_names_keeps_spaces_in_name():
+    """QCode denetimi #3: ad boşluk içeriyorsa son token almak adı kırpar."""
+    out = "          -1 2026-09-01 13:27:04        -1 my backup dir\n"
+    assert sm._lsd_names(out) == ["my backup dir"]
+
+
+def test_listremotes_idempotent_read_exact_match():
+    assert sm._is_idempotent_read("rclone listremotes") is True
+    assert sm._is_idempotent_read("rclone direxists gdrive:x") is True
+    # tam token eşleşmesi — benzer ad yanlış sınıflanmaz (OceanAPI #5)
+    assert sm._is_idempotent_read("rclone listremotesX") is False
+    # yazma komutu, içinde okuma token'ı geçse bile retry DIŞI
+    assert sm._is_idempotent_read("rclone copy listremotes dest") is False
+    assert sm._is_idempotent_read("rclone copyto direxists gdrive:x") is False
+
+
+def test_run_cmd_listremotes_retries_on_transient(monkeypatch, no_sleep):
+    calls = []
+    monkeypatch.setattr(sm.subprocess, "run", _make_fake_run(
+        [(1, "", "connection reset"), (0, "gdrive:\n", "")], calls))
+    out, rc = sm.run_cmd("rclone listremotes", timeout=30, retries=1)
+    assert rc == 0 and "gdrive:" in out
+    assert len(calls) == 2          # retry gerçekten yapıldı
+
+
+def test_run_cmd_write_with_read_token_no_retry(monkeypatch, no_sleep):
+    calls = []
+    monkeypatch.setattr(sm.subprocess, "run", _make_fake_run(
+        [(1, "", "connection reset")], calls))
+    out, rc = sm.run_cmd("rclone copyto /tmp/a gdrive:x", retries=1)
+    assert rc == 1
+    assert len(calls) == 1          # yazma komutuna retry YOK
+
+
+def _pull_cfg():
+    return {"machine": "T",
+            "gdrive": {"versioned_dir": "gdrive:cumulusos-backups/versiyonlu"},
+            "dirs": {"scripts": {"path": "/nonexistent"}}}
+
+
+def test_gdrive_pull_latest_rc_error_not_reported_as_missing(monkeypatch, caplog):
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    monkeypatch.setattr(sm, "run_cmd", lambda *a, **k: ("", 1))
+    with caplog.at_level("WARNING"):
+        assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    assert any("listesi alınamadı" in r.message for r in caplog.records)
+
+
+def test_gdrive_pull_latest_empty_listing_reports_no_version(monkeypatch, caplog):
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    monkeypatch.setattr(sm, "run_cmd", lambda *a, **k: ("", 0))
+    with caplog.at_level("INFO"):
+        assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    assert any("versiyon yok" in r.message for r in caplog.records)
+
+
+def test_gdrive_pull_latest_parses_latest_without_pipeline(monkeypatch):
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    calls = []
+    ls_out = ("          -1 2026-09-01 13:27:04        -1 20260901_132704\n"
+              "          -1 2026-09-02 01:39:11        -1 20260902_013911\n")
+
+    def fake_run_cmd(cmd, timeout=60, shell=False, retries=0, **kw):
+        calls.append((cmd, shell, retries))
+        if cmd.startswith("rclone lsd"):
+            return ls_out, 0
+        return "", 1          # copy adımı bilinçli başarısız (GDrive'a yazmıyoruz)
+
+    monkeypatch.setattr(sm, "run_cmd", fake_run_cmd)
+    assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    lsd_cmd, lsd_shell, lsd_retries = calls[0]
+    assert "|" not in lsd_cmd and lsd_shell is False   # pipeline YOK
+    assert lsd_retries == 1                            # retry açık
+    assert "2>/dev/null" not in lsd_cmd
+    assert "20260902_013911" in calls[1][0]            # en SON sürüm seçildi
+
+
+def test_no_pipeline_in_gdrive_reads_source_guard():
+    """Regresyon kapısı: okuma komutları pipeline'a geri dönmemeli (rc kaybı)."""
+    src = Path(sm.__file__).read_text(encoding="utf-8")
+    assert "rclone lsd" in src
+    assert "2>/dev/null | wc -l" not in src
+    assert "2>/dev/null | tail -1" not in src
