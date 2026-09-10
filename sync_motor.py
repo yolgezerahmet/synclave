@@ -455,7 +455,7 @@ def scan_directory(label, dir_cfg):
     max_bytes = dir_cfg.get("max_size_kb", 512) * 1024
 
     # GÜVENLİK: hassas dosya kalıpları — asla manifest'e girmez
-    SECRET_PATTERNS = (".env", ".env.", "*.key", "*.pem", "*.p12",
+    SECRET_PATTERNS = (".env", ".env.*", "*.key", "*.pem", "*.p12",
                        "id_rsa", "id_ed25519", "*.token", "secrets",
                        "credentials", "service-account", "*-sa-key")
     # GÜVENLİK: hassas dizin adları — yol bileşeninden reddedilir
@@ -468,14 +468,19 @@ def scan_directory(label, dir_cfg):
                          "*.tflite", "*.model", "*.lora", "*.adapter")
     GPU_MAX_KB = 51200  # 50MB üzeri model dosyası senkron dışı (metadata-only)
     # GPT-5.6 P0 (15 Ağu): İÇERİK taraması — dosya adı filtresi yetmez;
-    # riskli adaylarda token/anahtar pattern'leri taranır (≤64KB, performans)
-    CONTENT_SCAN_NAMES = ("config.json", "settings.yaml", "settings.yml",
+    # riskli adaylarda token/anahtar PREFIX'leri taranır (≤64KB, performans).
+    # NOT (8 Eyl konsensüs): literal alt dize kontrolü ("in") kullanılır —
+    # REGEX yazmayın, çalışmaz (bytes literal gerçek anahtarla eşleşmez).
+    # Provider prefix'leri: sk- (DeepSeek/OceanAPI/OpenAI), cr_ (QCode),
+    # yzk_ (YapayZekaLab), nvapi- (NVIDIA), fc- (Firecrawl), AIza (Google),
+    # ghp_/github_pat_ (GitHub PAT), AKIA (AWS), xoxb-/xoxp- (Slack).
+    CONTENT_SCAN_NAMES = ("config.json", "config.yaml", "settings.yaml", "settings.yml",
                           "tokens.db", "rclone.conf", "backup.tar",
                           "credentials.txt", "secrets.txt", "token.db")
     CONTENT_PATTERNS = (b"BEGIN PRIVATE KEY", b"BEGIN OPENSSH PRIVATE KEY",
-                        b"ghp_", b"github_pat_", b"AKIA[0-9A-Z]{16}",
-                        b"xox[baprs]-", b"sk-[A-Za-z0-9]{20,}",
-                        b"-----BEGIN")
+                        b"-----BEGIN", b"ghp_", b"github_pat_", b"AKIA",
+                        b"xoxb-", b"xoxp-", b"sk-", b"cr_",
+                        b"yzk_", b"nvapi-", b"fc-", b"AIza")
 
     def is_secret(fname):
         import fnmatch
