@@ -442,3 +442,51 @@ def test_rclone_read_only_read_tokens_accepted():
         assert sm._is_idempotent_read(" ".join(["rclone"] + args))
     for args in (["copyto", "a", "b"], ["copy", "a", "b"], ["mkdir", "gdrive:hub/x"]):
         assert not sm._is_idempotent_read(" ".join(["rclone"] + args))
+
+
+# ─── Denetim bulguları (QCode/OceanAPI hipotezleri) — exception sınıfı ─────
+
+def test_rclone_read_fatal_exception_no_retry(monkeypatch, no_sleep):
+    """KALICI exception (rclone kurulu değil) → retry YOK, tek deneme.
+
+    Hipotez: rc==-1 durumunda geçici sayılıp 3s boşa bekleme + çift deneme
+    yapılabilir. Politika: _RETRY_FATAL ('no such file'/'command not found')
+    eşleşirse geçici SAYILMAZ (run_cmd ile aynı kural).
+    """
+    calls = []
+
+    def fake_run(cmd_args, capture_output=True, text=True, errors="replace",
+                 timeout=60, **kw):
+        calls.append(list(cmd_args))
+        raise FileNotFoundError(2, "No such file or directory", "rclone")
+
+    _patch_subprocess(monkeypatch, sm, fake_run)
+    rc, out, err = sm.rclone_read(["lsf", "gdrive:hub/x"])
+    assert rc == -1 and len(calls) == 1
+    assert "No such file" in err
+
+
+def test_rclone_read_transient_exception_retries(monkeypatch, no_sleep):
+    """GEÇİCİ exception (bağlantı sıfırlandı) → 1 retry, sonra başarı."""
+    calls = []
+
+    def fake_run(cmd_args, capture_output=True, text=True, errors="replace",
+                 timeout=60, **kw):
+        calls.append(list(cmd_args))
+        if len(calls) == 1:
+            raise ConnectionResetError("connection reset by peer")
+        return _FakeResult(0, "ok\n", "")
+
+    _patch_subprocess(monkeypatch, sm, fake_run)
+    rc, out, err = sm.rclone_read(["lsf", "gdrive:hub/y"])
+    assert rc == 0 and len(calls) == 2
+
+
+def test_rclone_read_permission_denied_no_retry(monkeypatch, no_sleep):
+    """rc=1 + 'permission denied' → kalıcı: gereksiz 3s retry beklemesi YOK."""
+    calls = []
+    fake = _make_fake_run([(1, "", "403 Forbidden: permission denied")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    rc, out, err = sm.rclone_read(["lsjson", "gdrive:hub/x", "--hash"])
+    assert rc == 1 and len(calls) == 1
+    assert "permission denied" in err
