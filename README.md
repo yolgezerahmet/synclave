@@ -179,6 +179,8 @@ Windows notları:
 - A2A istemcisi (`a2a_cli.py`) yalnızca `urllib` kullanır — ek bağımlılık gerekmez.
 - A2A server `uvicorn` bulunamazsa net hata mesajı basar ve çıkar (traceback değil).
 - Uzaktan kurulum için hazır betikler: `remote_hermes_setup.ps1` (SSH/Tailscale).
+- Adım adım tam prosedür (rclone OAuth, restic, Syncthing, A2A token, Task Scheduler):
+  [`docs/windows.md`](docs/windows.md).
 
 ### Güvenlik
 
