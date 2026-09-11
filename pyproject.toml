@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synclave"
-version = "2.5.0"
+version = "2.5.1"
 description = "Synclave — encrypted multi-node backup, replication, and agent mesh (A2A + Syncthing + restic + shared state). Formerly hermes-sync."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,5 +1,57 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.5.1] — 2026-09-11 (KİLİT BÜTÜNLÜĞÜ: sahip kaydı korunur + fallback fail-closed)
+
+- **Bulgu 1 (ölçüldü — reddedilen aday sahibin kaydını siliyordu):**
+  ```
+  fd1 = acquire_lock()   -> True   dosya: "2197392 2026-09-11T17:11:10.438307Z"
+  fd2 = acquire_lock()   -> None   (RED doğru)
+  sonra dosya boyutu     -> 0      kayıt: ""        (YANLIŞ: kayıt silindi)
+  ```
+  Kök neden: `acquire_lock` dosyayı `open(..., "w")` ile **kilit kararından
+  önce** kesiyordu (`O_TRUNC`). Reddedilen aday hiçbir şey yazmadığı hâlde
+  sahibin PID/ts kaydını yok ediyordu → `sync status` / operatör "kim
+  kilitli?" bilgisini kaybediyordu.
+
+- **Bulgu 2 (ölçüldü — ölü guard, fail-open):** `fcntl` ve `msvcrt` bulunmayan
+  platformda pid-dosyası guard'ı (`getsize > 0`) truncate'ten SONRA okunduğu
+  için **hiç tetiklenemiyordu**; canlı bir sahip kaydı dururken bile kilit
+  alınıyordu (`acquire_lock() -> fd`), yani iki eşzamanlı koşu birlikte
+  yazabilirdi. Ölçüm: 29 baytlık canlı pid kaydı varken `-> ALINDI (HATA)`.
+
+- **Düzeltme:** dosya artık `r+` (mevcut) / `w+` (ilk oluşturma) ile açılır —
+  **kesme yok**; kaybeden aday hiçbir bayt yazmaz. Sahip kaydı kilit
+  **alındıktan sonra** ve **sabit genişlikte** (64 bayt, boşluk dolgu) yazılır
+  → eski kayıttan artık kalmaz, dosya koşu başına büyümez. Kilit API'si
+  yoksa pid guard'ı **dosya açılmadan önce** okunur (canlı pid → RED).
+  Windows yolunda kilitlenecek aralık yoksa (0 bayt) önce dolgu yazılır,
+  `msvcrt.locking(..., 1)` semantiği değişmez.
+
+- **Kayıt yazımı kilidi düşürmez:** `_kilit_kaydi_yaz` hata verse bile kilit
+  korunur (disk/izin sorunu sync'i tümden reddettirmemeli — kayıt yalnız
+  teşhis bilgisidir). Regresyon: `test_kayit_yazimi_basarisizsa_kilit_dusmez`.
+
+- **Regresyon testleri (5 yeni, `tests/test_windows_uyum.py` §e):**
+  `test_red_edilen_aday_sahibin_kaydini_silmez` (bulgu 1),
+  `test_fallback_canli_pid_reddeder` (bulgu 2, fail-closed),
+  `test_kilit_kaydi_sinirli_buyume` (sabit genişlik),
+  `test_kayit_yazimi_basarisizsa_kilit_dusmez`,
+  `test_msvcrt_mevcut_kayit_korunur_ve_buyumez` (Windows yolu).
+  Public 234 test PASS; private ikiz depoda aynı ağaç.
+
+- **Bağımsız denetim:** OceanAPI (gpt-5.6-sol) 3 denemede HTTP 504 verdi →
+  ücretsiz denetçi Nemotron-3-Ultra-550B (NVIDIA) ile denetlendi; iki kök
+  neden doğrulandı, kayıt-yazımı riski (R5) kapatıldı. Denetçinin
+  "`msvcrt.locking` 1 bayt → truncate sonrası kilit görünmez olur" iddiası
+  **kabul edilmedi** (kilit aralığı truncate ile düşmez; kanıtsız) — bunun
+  yerine truncate tamamen kaldırıldı, böylece tartışma konusu ortadan kalktı.
+
+- **Kapsam dışı bırakılan (kayıtlı):** `smart_sync.py` (kök, eski motor) aynı
+  `open(..., "w")` desenini taşır; hiçbir cron/systemd birimi tarafından
+  çağrılmıyor (ölü kod). Yeniden etkinleştirilirse aynı düzeltme şart.
+  `conversation_bridge._acquire_lock` etkilenmez (`os.open(O_CREAT|O_RDWR)`,
+  truncate yok).
+
 ## [2.5.0] — 2026-09-11 (KOPYA PARİTESİ: tek kanonik motor + sapma kapısı)
 
 - **Bulgu (gerçek sapma):** `sync_motor.py` dört kopyada FARKLI içerikteydi —

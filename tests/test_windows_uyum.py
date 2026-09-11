@@ -139,7 +139,89 @@ def test_a2a_cli_rpc_token_header(monkeypatch):
     assert seen["auth"] == "Bearer tok123"
 
 
-# ─── (d) A2A server: uvicorn yoksa net hata ─────────────────────
+# ─── (e) Kilit kaydı bütünlüğü (v2.5.1 — ölçülmüş iki hata) ─────
+# Kök neden: `open(MOTOR_LOCK, "w")` kilit kararından ÖNCE dosyayı kesiyordu.
+# (a) reddedilen aday sahibin PID kaydını siliyordu,
+# (b) kilit API'si olmayan yolda pid guard'ı (getsize > 0) hiç tetiklenemiyordu.
+
+def test_red_edilen_aday_sahibin_kaydini_silmez(monkeypatch, tmp_path):
+    monkeypatch.setattr(sm, "MOTOR_LOCK", str(tmp_path / "cumulus_sync.lock"))
+    fd1 = sm.acquire_lock()
+    assert fd1 is not None
+    onceki = open(sm.MOTOR_LOCK, encoding="utf-8").read()
+    assert onceki.split()[0] == str(os.getpid())
+    fd2 = sm.acquire_lock()                      # ikinci aday: RED (korunur)
+    assert fd2 is None
+    sonraki = open(sm.MOTOR_LOCK, encoding="utf-8").read()
+    assert sonraki.split()[0] == str(os.getpid())   # kayıt SİLİNMEDİ
+    assert os.path.getsize(sm.MOTOR_LOCK) > 0
+    fd1.close()
+    fd3 = sm.acquire_lock()                      # sahip bıraktı → yeniden alınır
+    assert fd3 is not None
+    fd3.close()
+
+
+def test_fallback_canli_pid_reddeder(monkeypatch, tmp_path):
+    """Kilit API'si yokken canlı pid kaydı → fail-closed (None)."""
+    p = tmp_path / "cumulus_sync.lock"
+    p.write_text(f"{os.getpid()} 2026-09-11T00:00:00Z\n", encoding="utf-8")
+    monkeypatch.setattr(sm, "MOTOR_LOCK", str(p))
+    monkeypatch.setattr(sm, "fcntl", None)
+    monkeypatch.setattr(sm, "msvcrt", None, raising=False)
+    assert sm.acquire_lock() is None             # canlı sahip → RED
+    p.write_text("999999 2026-09-11T00:00:00Z\n", encoding="utf-8")
+    fd = sm.acquire_lock()                       # ölü pid → en iyi çaba devam
+    assert fd is not None
+    fd.close()
+
+
+def test_kilit_kaydi_sinirli_buyume(monkeypatch, tmp_path):
+    """Kayıt sabit genişlik: ardışık koşular dosyayı büyütmez, tek kayıt kalır."""
+    monkeypatch.setattr(sm, "MOTOR_LOCK", str(tmp_path / "cumulus_sync.lock"))
+    for _ in range(5):
+        fd = sm.acquire_lock()
+        assert fd is not None
+        fd.close()
+    assert os.path.getsize(sm.MOTOR_LOCK) <= sm._KILIT_KAYIT_UZUNLUK
+    assert open(sm.MOTOR_LOCK, encoding="utf-8").read().split()[0] == str(os.getpid())
+
+
+def test_kayit_yazimi_basarisizsa_kilit_dusmez(monkeypatch, tmp_path):
+    """Kayıt yazımı hata verse de kilit KORUNUR (kayıt yalnız teşhis bilgisi)."""
+    monkeypatch.setattr(sm, "MOTOR_LOCK", str(tmp_path / "cumulus_sync.lock"))
+
+    def _patlat(fd):
+        raise OSError("disk dolu (simüle)")
+
+    monkeypatch.setattr(sm, "_kilit_kaydi_yaz", _patlat)
+    fd = sm.acquire_lock()
+    assert fd is not None
+    fd.close()
+
+
+def test_msvcrt_mevcut_kayit_korunur_ve_buyumez(monkeypatch, tmp_path):
+    """Windows yolu: mevcut kayıt varken dosya büyümez, kilit aralığı 1 bayt."""
+    cagrilar = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 6
+
+        def locking(self, fd, mode, nbytes):
+            cagrilar.append((mode, nbytes))
+
+    p = tmp_path / "cumulus_sync.lock"
+    p.write_text("111 2026-01-01T00:00:00Z\n", encoding="utf-8")
+    monkeypatch.setattr(sm, "fcntl", None)
+    monkeypatch.setattr(sm, "msvcrt", FakeMsvcrt(), raising=False)
+    monkeypatch.setattr(sm, "MOTOR_LOCK", str(p))
+    fd = sm.acquire_lock()
+    assert fd is not None
+    icerik = p.read_text(encoding="utf-8")
+    assert icerik.split()[0] == str(os.getpid())      # sahip kaydı güncel
+    assert len(icerik) <= sm._KILIT_KAYIT_UZUNLUK     # sınırsız büyüme yok
+    assert cagrilar == [(6, 1)]
+    fd.close()
+
 
 def test_a2a_server_uvicorn_missing(monkeypatch, capsys):
     """uvicorn import edilemiyor → HATA mesajı + exit 1 (ham traceback yok)."""

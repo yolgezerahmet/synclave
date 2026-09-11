@@ -35,6 +35,12 @@ ZORUNLU_SEMBOLLER = (
     "def _log_event(",
     "def cmd_identity(",
     "def _is_idempotent_read(",
+    # v2.5.1 kilit bütünlüğü: sahip kaydı korunur + fallback fail-closed.
+    # Bir kopya bu üçünü taşımıyorsa eski (keserek açan) acquire_lock'a dönmüş
+    # demektir — kilit kaydı sessizce silinir ve guard ölür (fail-open).
+    "_KILIT_KAYIT_UZUNLUK",
+    "def _pid_record_alive(",
+    "def _kilit_kaydi_yaz(",
     "_SURUM_ADI_RE",
     '"listremotes"',
     '"direxists"',

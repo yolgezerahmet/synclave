@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -2342,35 +2342,89 @@ def _log_event(komut, rc, node=None, extra=None):
 MUTATING_CMDS = {"push", "pull", "both", "backup", "rollback",
                  "init", "add-node", "share", "apply", "memory"}
 
+# Kilit dosyasındaki sahip kaydı SABİT genişlikte yazılır (boşluk dolgu):
+# eski kayıttan artık kalmaz ve dosya sınırsız büyümez (her koşu +1 satır
+# eklemek yerine aynı 64 baytlık alan ezilir).
+_KILIT_KAYIT_UZUNLUK = 64
+
+
+def _pid_record_alive() -> bool:
+    """Kilit dosyasındaki pid kaydı hâlâ canlı mı? (yalnız kilit API'si yokken)
+
+    v2.5.1: bu okuma `acquire_lock` içinde DOSYA AÇILMADAN ÖNCE yapılır —
+    önceki kodda truncate eden `open(..., "w")` çağrısından SONRA okunduğu
+    için kayıt her zaman boş görünüyordu ve guard hiç tetiklenemiyordu.
+    """
+    try:
+        if os.path.exists(MOTOR_LOCK) and os.path.getsize(MOTOR_LOCK) > 0:
+            pid = open(MOTOR_LOCK, encoding="utf-8",
+                       errors="replace").read().split()[0]
+            if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _kilit_kaydi_yaz(fd):
+    """Sahip kaydını (pid + UTC ts) sabit genişlikte yaz — EN İYİ ÇABA.
+
+    Yazım başarısız olursa kilit DÜŞÜRÜLMEZ: kilit kararı esastır, bu kayıt
+    yalnız teşhis/izleme bilgisidir (kayıt yüzünden sync'i reddetmek yanlış
+    olurdu).
+    """
+    try:
+        fd.seek(0)
+        fd.write(f"{os.getpid()} {_now_iso_utc()}".ljust(_KILIT_KAYIT_UZUNLUK))
+        fd.flush()
+    except Exception:
+        pass
+
+
 def acquire_lock():
     """Aynı anda yalnız bir sync işlemi GDrive/GitHub'a yazsın.
 
     Linux: fcntl.flock(LOCK_EX|LOCK_NB) — ikinci koşu anında RED.
     Windows: msvcrt.locking — dosyanın ilk baytını kilitler.
     Dönüş: fd (kilit sahibi) veya None (başka sync aktif).
+
+    v2.5.1 (ölçülmüş iki hata kapatıldı): dosya eskiden `open(..., "w")` ile
+    KESİLEREK açılıyordu — kilit kararından ÖNCE truncate. Ölçülen sonuçlar:
+      (a) Reddedilen aday, sahibin PID/ts kaydını siliyordu (dosya 0 bayt;
+          `sync status` "kim kilitli" bilgisini kaybediyordu).
+      (b) fcntl/msvcrt bulunmayan platformda pid guard'ı (`getsize > 0`) hiç
+          tetiklenemiyordu → fail-open: iki eşzamanlı koşu birlikte yazabilirdi.
+    Artık dosya `r+` (mevcut) / `w+` (ilk oluşturma) ile AÇILIR: kesme yok,
+    kaybeden aday hiçbir şey yazmaz. Kayıt kilit ALINDIKTAN sonra yazılır.
     """
+    # Kilit API'si yoksa: pid kaydını DOSYA AÇILMADAN önce oku (truncate ezmesin).
+    if fcntl is None and msvcrt is None and _pid_record_alive():
+        return None
     try:
-        fd = open(MOTOR_LOCK, "w", encoding="utf-8")
+        if os.path.exists(MOTOR_LOCK):
+            fd = open(MOTOR_LOCK, "r+", encoding="utf-8")   # truncate YOK
+        else:
+            fd = open(MOTOR_LOCK, "w+", encoding="utf-8")   # ilk oluşturma
     except OSError:
         return None
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         elif msvcrt is not None:
+            fd.seek(0, 2)
+            if fd.tell() == 0:      # kilitlenecek bayt aralığı olsun
+                fd.write(" " * _KILIT_KAYIT_UZUNLUK)
+                fd.flush()
             fd.seek(0)
-            fd.write("\0")
-            fd.flush()
             msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-            fd.seek(0)
-        else:
-            # kilit desteği yok — yalnızca pid dosyası (en iyi çaba)
-            if os.path.exists(MOTOR_LOCK) and os.path.getsize(MOTOR_LOCK) > 0:
-                pid = open(MOTOR_LOCK, encoding="utf-8", errors="replace").read().split()[0]
-                if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
-                    return None
+        # kilit ALINDI → sahip kaydı. Kayıt yazımı, kilit kararını ETKİLEMEZ:
+        # hata yutsa bile kilit korunur (aksi halde disk/izin sorunu sync'i
+        # tümden reddettirirdi — fail-closed yanlış yönde çalışırdı).
+        try:
+            _kilit_kaydi_yaz(fd)
+        except Exception:
+            pass
         fd.seek(0, 2)
-        fd.write(f"{os.getpid()} {_now_iso_utc()}\n")
-        fd.flush()
         return fd
     except OSError:
         try:
