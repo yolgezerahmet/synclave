@@ -707,6 +707,12 @@ def _is_transient_rc(rc: int, err: str) -> bool:
     return any(m in e for m in _RETRY_TRANSIENT)
 
 
+# Sürüm klasörü adı biçimi (GDrive versiyonlu yedek): YYYYMMDD_HHMMSS.
+# Tam eşleşme şart — uzunluk saymak yetmez ('20260901132704_' 15 karakterdir
+# ama alt çizgi yanlış yerdedir; bağımsız denetim bulgusu, 11 Eyl 2026).
+_SURUM_ADI_RE = re.compile(r"^\d{8}_\d{6}$")
+
+
 def _lsd_names(out: str) -> list:
     """rclone lsd çıktısından dizin adlarını ayıkla (her satırın son token'ı).
 
@@ -1668,8 +1674,10 @@ def gdrive_pull_latest(cfg, node):
     # bulgusu, 11 Eyl 2026) → yalnız YYYYMMDD_HHMMSS biçimindeki adlar alınır ve
     # sözlük sırasına göre en büyüğü seçilir (bu biçimde sözlük sırası =
     # kronolojik sıra). Bozuk/ilgisiz dizin adları sessizce atlanır.
-    gecerli = [n for n in names
-               if len(n) == 15 and n.replace("_", "").isdigit()]
+    # Sonda denetimi: biçim TAM eşleşmeli — yalnız uzunluk saymak yetmez
+    # ('20260901132704_' 15 karakterdir ama alt çizgi yanlış yerde; ikinci
+    # denetim turunda yakalandı).
+    gecerli = [n for n in names if _SURUM_ADI_RE.match(n)]
     if not gecerli:
         log.warning(f"{node}: geçersiz versiyon klasörü: {names[-1]}")
         return False

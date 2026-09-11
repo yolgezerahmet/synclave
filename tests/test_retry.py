@@ -360,6 +360,34 @@ def test_gdrive_pull_latest_cikti_sirasi_garanti_degil(monkeypatch):
     assert "20260901_132704" not in calls[1][0]
 
 
+def test_gdrive_pull_latest_gecersiz_bicim_elener(monkeypatch):
+    """Biçim TAM eşleşmeli: '20260901132704_' (alt çizgi sonda, 15 karakter) ELENİR.
+
+    İkinci denetim turu bulgusu (11 Eyl 2026): `len(n)==15 and n.replace('_','').isdigit()`
+    yalnız uzunluk sayıyordu → alt çizgi yanlış yerde olsa da geçiyordu ve `max()`
+    ile seçilebiliyordu. `^\\d{8}_\\d{6}$` ile yapısal bozuk ad dışarıda kalır.
+    """
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    calls = []
+    # DİKKAT: bozuk ad, geçerli adlardan SÖZLÜK SIRASINDA DAHA BÜYÜK seçildi —
+    # aksi hâlde `max()` zaten doğru adı seçerdi ve test kanıt olmazdı.
+    ls_out = ("   -1 2026-09-11 07:00:00        -1 20260911070000_\r\n"
+              "   -1 2026-09-02 01:39:11        -1 20260902_013911\n"
+              "   -1 2026-09-03 02:00:00        -1 _20260903_020000\n")
+
+    def fake_run_cmd(cmd, timeout=60, shell=False, retries=0, **kw):
+        calls.append((cmd, shell, retries))
+        if cmd.startswith("rclone lsd"):
+            return ls_out, 0
+        return "", 1
+
+    monkeypatch.setattr(sm, "run_cmd", fake_run_cmd)
+    assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    assert "20260902_013911" in calls[1][0]       # tek geçerli ad seçildi
+    assert "20260911070000_" not in calls[1][0]   # sözlük sırası büyük ama BOZUK ad seçilmedi
+    assert "_20260903_020000" not in calls[1][0]
+
+
 def test_gdrive_pull_latest_tamamen_gecersiz_liste_uyarir(monkeypatch, caplog):
     """Hiç geçerli timestamp dizini yoksa: retry edilmiş liste + warning (fail-closed)."""
     monkeypatch.setattr(sm, "rclone_available", lambda: True)

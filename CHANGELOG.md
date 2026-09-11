@@ -25,9 +25,15 @@
   biçimsiz dizin adları sessizce elenir, hepsi geçersizse warning + fail-closed.
   Regresyon: `test_gdrive_pull_latest_cikti_sirasi_garanti_degil` (karışık
   sıralı + CRLF + gürültü satırlı çıktı) ve `..._tamamen_gecersiz_liste_uyarir`.
+- **İkinci denetim turu bulgusu — kapatıldı:** ilk düzeltmedeki
+  `len(n) == 15 and n.replace("_","").isdigit()` yalnız UZUNLUK sayıyordu;
+  `20260911070000_` (alt çizgi sonda, 15 karakter, sözlük sırası büyük) filtreyi
+  geçip `max()` ile YANLIŞ sürümü seçtiriyordu — negatif kontrolle kanıtlandı.
+  Yerine tam biçim kapısı: `_SURUM_ADI_RE = ^\d{8}_\d{6}$`
+  (`test_gdrive_pull_latest_gecersiz_bicim_elener`).
 - **Paket sürümü:** `pyproject.toml` iki depoda hizalandı (public 1.0.1,
   private 2.4.1 → **1.0.2**); PyPI hattı tek (synclave).
-- Test: public 215 PASS, private 218 PASS.
+- Test: public 216 PASS, private 219 PASS.
 
 ## [2.3.2] — 2026-09-10 (rclone OKUMA retry kapsamı tamamlandı)
 
