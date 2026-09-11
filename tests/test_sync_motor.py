@@ -92,6 +92,69 @@ class TestScan(unittest.TestCase):
         self.assertNotIn("test/skip.o", paths)
         self.assertNotIn("test/buyuk.c", paths)
 
+    def test_scan_secret_exclusion(self):
+        """GÜVENLİK: .env/.env.*/*.key dosyaları manifest'e ASLA girmez (konsensüs 8 Eyl)."""
+        Path(self.tmp, ".env").write_text("TOKEN=gercek-anahtar\n")
+        Path(self.tmp, ".env.prod").write_text("TOKEN=gercek-anahtar\n")
+        # gerçekçi anahtar formatları (tireli sk- / cr_ prefix'leri)
+        Path(self.tmp, "config.json").write_text('{"api_key": "sk-tr-lm1234567890abcdef"}\n')
+        Path(self.tmp, "config.yaml").write_text('qcode: cr_abcd1234567890\n')
+        Path(self.tmp, "id_rsa").write_text("PRIVATE KEY\n")
+        cfg = {"path": self.tmp, "include": "*", "exclude_dirs": [], "max_size_kb": 512}
+        inv = sm.scan_directory("test", cfg)
+        paths = set(inv.keys())
+        # .env (ad) + .env.prod (desen .env.*) + id_rsa (ad) manifest'te YOK
+        self.assertNotIn("test/.env", paths, ".env manifest'e girmemeli")
+        self.assertNotIn("test/.env.prod", paths, ".env.prod manifest'e girmemeli")
+        self.assertNotIn("test/id_rsa", paths, "id_rsa manifest'e girmemeli")
+        # İÇERİK taraması: config.json/config.yaml içindeki anahtar formatları eleyebilmeli
+        self.assertNotIn("test/config.json", paths, "config.json içinde sk- anahtarı varken girdi")
+        self.assertNotIn("test/config.yaml", paths, "config.yaml içinde cr_ anahtarı varken girdi")
+
+    def test_is_secret_pattern(self):
+        """is_secret fnmatch desenleri: .env.* varyantları kaçmamalı (8 Eyl fix)."""
+        import fnmatch
+        # is_secret scan_directory içinde iç fonksiyon; modül seviyesinde değil.
+        # Her desen kendi temsilcisiyle eşleşmeli (ölü desen tespiti):
+        cases = ((".env", ".env"), (".env.*", ".env.prod"), ("*.key", "x.key"),
+                 ("*.pem", "x.pem"), ("id_rsa", "id_rsa"))
+        for pat, cand in cases:
+            self.assertTrue(fnmatch.fnmatch(cand, pat), f"ölü desen: {pat} → {cand}")
+        # varyant kaçmamalı: .env.prod ".env" ile DEĞİL ".env.*" ile eşleşir
+        self.assertFalse(fnmatch.fnmatch(".env.prod", ".env"))
+        self.assertTrue(fnmatch.fnmatch(".env.prod", ".env.*"))
+
+
+class TestSyncMode(unittest.TestCase):
+    """sync_mode='backup' node'lar push-only yedektir — pull'da ATLANIR (8 Eyl)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = {
+            "machine": "H1",
+            "state": {"manifest_local": os.path.join(self.tmp, "m.json"),
+                      "logfile": os.path.join(self.tmp, "l.txt")},
+            "dirs": {
+                "memories": {"path": os.path.join(self.tmp, "mem"),
+                             "gdrive": True, "sync_mode": "bidir"},
+                "cron": {"path": os.path.join(self.tmp, "cron"),
+                         "gdrive": True, "sync_mode": "backup"},
+            },
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_backup_node_gdrive_pull_atlanir(self):
+        with mock.patch.object(sm, "gh_fetch_manifest", return_value={"files": {}}), \
+             mock.patch.object(sm, "scan_all", return_value={}), \
+             mock.patch.object(sm, "verify_build", return_value=0), \
+             mock.patch.object(sm, "gdrive_pull_latest", return_value=True) as gp:
+            sm.cmd_pull(self.cfg)
+        called = [c.args[1] for c in gp.call_args_list]  # gdrive_pull_latest(cfg, node)
+        self.assertIn("memories", called, "bidir node GDrive'dan çekilmeli")
+        self.assertNotIn("cron", called, "backup node GDrive'dan ÇEKİLMEMELİ (push-only)")
+
 
 class TestManifest(unittest.TestCase):
     def setUp(self):
