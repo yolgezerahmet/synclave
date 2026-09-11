@@ -7,7 +7,19 @@ import shutil
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Modülleri barındıran dizini işaret dosyasıyla bul: betik depo kökünde veya
+# tests/manual/ altında olabilir; sabit dirname sayısı kırılgan (private kopyada
+# bir fazla dirname yanlış dizini gösteriyordu — 11 Eyl 2026).
+_KOK = HERE
+for _ in range(4):
+    if os.path.isfile(os.path.join(_KOK, "sync_motor.py")):
+        break
+    _KOK = os.path.dirname(_KOK)
+for _p in (HERE, _KOK, os.path.join(_KOK, "synclave")):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 import sync_memory as sm
 
 TMP = tempfile.mkdtemp(prefix="syncmem_test_")
