@@ -1,5 +1,27 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.5.0] — 2026-09-11 (KOPYA PARİTESİ: tek kanonik motor + sapma kapısı)
+
+- **Bulgu (gerçek sapma):** `sync_motor.py` dört kopyada FARKLI içerikteydi —
+  public kök 2.2.0, public paket 2.3.2, private kök ve private paket 2.4.2.
+  Üretim kök kopyası (cron'un çalıştırdığı `/root/cumulus-sync-motor/sync_motor.py`)
+  v2.3.2'nin GDrive düzeltmesini TAŞIMIYORDU: `rclone lsd … | wc -l` /
+  `| tail -1` pipeline'ları rc'yi `wc`/`tail`'den alıyordu → gerçek rclone
+  rc'si kayboluyor, retry hiç tetiklenmiyor, ağ hatası "versiyon yok" gibi
+  görünüyordu. Testler yalnız paket kopyasını okuduğu için sapma görünmezdi
+  (yeşil test + bozuk üretim).
+- **Birleştirme:** kanonik = üretim kopyası ∪ diğer kopyaların eksik parçaları.
+  Gelen: `_lsd_names()` (pipeline'sız, CRLF toleranslı, son-timestamp seçimi),
+  `_RETRY_READ_TOKENS` genişletmesi (`listremotes`/`direxists`/`about`),
+  hash önbelleği + olay akışı (`_sha_cached`/`_log_event`) ve `cmd_identity`.
+  Dört kopya artık byte-eşit (tek SHA-256).
+- **Regresyon kapısı (`tests/test_kopya_parite.py`):** kök ↔ paket byte
+  eşitliği, zorunlu sembol birleşimi, pipeline kalıntısı yasağı, tek
+  `__version__` + CHANGELOG uyumu, ikiz depo (private) parite kontrolü.
+- **Paket sürümü:** `pyproject.toml` iki depoda hizalandı (public 1.0.1,
+  private 2.4.1 → **1.0.2**); PyPI hattı tek (synclave).
+- Test: 212 PASS (public 208 → +4 parite; private 211 → +1).
+
 ## [2.3.2] — 2026-09-10 (rclone OKUMA retry kapsamı tamamlandı)
 
 - **Kapatan modül (GÖREV 1 artığı):** `sync_motor.py` içinde `subprocess.run`

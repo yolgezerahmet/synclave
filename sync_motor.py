@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.2.0"
+__version__ = "2.5.0"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -470,10 +470,9 @@ def scan_directory(label, dir_cfg):
     # GPT-5.6 P0 (15 Ağu): İÇERİK taraması — dosya adı filtresi yetmez;
     # riskli adaylarda token/anahtar PREFIX'leri taranır (≤64KB, performans).
     # NOT (8 Eyl konsensüs): literal alt dize kontrolü ("in") kullanılır —
-    # REGEX yazmayın, çalışmaz (bytes literal gerçek anahtarla eşleşmez).
-    # Provider prefix'leri: sk- (DeepSeek/OceanAPI/OpenAI), cr_ (QCode),
-    # yzk_ (YapayZekaLab), nvapi- (NVIDIA), fc- (Firecrawl), AIza (Google),
-    # ghp_/github_pat_ (GitHub PAT), AKIA (AWS), xoxb-/xoxp- (Slack).
+    # REGEX yazmayın, çalışmaz. Kullanılan provider prefix'leri: sk- (DeepSeek/
+    # OceanAPI/OpenAI), cr_ (QCode), yzk_ (YapayZekaLab), nvapi- (NVIDIA),
+    # fc- (Firecrawl), AIza (Google), ghp_ (GitHub PAT), xox (Slack).
     CONTENT_SCAN_NAMES = ("config.json", "config.yaml", "settings.yaml", "settings.yml",
                           "tokens.db", "rclone.conf", "backup.tar",
                           "credentials.txt", "secrets.txt", "token.db")
@@ -564,7 +563,7 @@ def scan_directory(label, dir_cfg):
                                   f"(worktree + ana repo farklı branch)")
                     continue
                 inventory[key] = {
-                    "sha": sha256_file(fpath),
+                    "sha": _sha_cached(key, fpath, stat.st_mtime, stat.st_size),
                     "size": stat.st_size,
                     "mtime": int(stat.st_mtime),
                     "machine": detect_machine(),
@@ -572,11 +571,24 @@ def scan_directory(label, dir_cfg):
     return inventory
 
 
+def _sha_cached(key, fpath, mtime, size):
+    """Hash önbelleği: mtime+size değişmediyse önceki SHA (hesaplama YOK)."""
+    cache = _load_hash_cache()
+    ent = cache.get(key)
+    if ent and ent.get("mtime") == int(mtime) and ent.get("size") == size \
+            and ent.get("sha"):
+        return ent["sha"]
+    sha = sha256_file(fpath)
+    cache[key] = {"sha": sha, "mtime": int(mtime), "size": size}
+    return sha
+
+
 def scan_all(cfg):
     """Tüm yapılandırılmış dizinleri tara, birleşik envanter döndür."""
     inventory = {}
     for label, dir_cfg in cfg["dirs"].items():
         inventory.update(scan_directory(label, dir_cfg))
+    _save_hash_cache()  # tarama sonunda önbelleği kalıcılaştır
     return inventory
 
 
@@ -600,7 +612,7 @@ def save_manifest(cfg, mf):
     # GPT-5.6 P1 (15 Ağu): manifest meta — rollback/replay koruması başlangıcı
     mf.setdefault("schema", 2)
     mf["machine_id"] = detect_machine()
-    mf["created_at"] = datetime.now().isoformat()
+    mf["created_at"] = _now_iso_utc()
     mf["generation"] = int(mf.get("generation", 0)) + 1
     path = cfg["state"]["manifest_local"]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -642,7 +654,8 @@ def gh_available():
 # run_cmd'de retry YALNIZCA idempotent OKUMA komutlarına uygulanır
 # (cat/lsf/lsjson/lsd/status). Yazma komutlarına (copy/copyto/backup)
 # ASLA retry YOK — çift yazma/kısmi durum fail-closed korunur.
-_RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping"}
+_RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
+                      "listremotes", "direxists", "about"}
 # Yazma alt-komutları — dosya adı okuma kelimesine benzese bile (örn.
 # 'rclone copy status <dest>') asla retry açılmaz (çift yazma fail-closed).
 _RETRY_WRITE_TOKENS = {
@@ -692,6 +705,28 @@ def _is_transient_rc(rc: int, err: str) -> bool:
     if re.search(r"\b5\d\d\b", e):
         return True
     return any(m in e for m in _RETRY_TRANSIENT)
+
+
+def _lsd_names(out: str) -> list:
+    """rclone lsd çıktısından dizin adlarını ayıkla (her satırın son token'ı).
+
+    Pipeline'sız kullanım için: `| tail -1` / `| wc -l` yerine burada parse
+    edilir — böylece rc GERÇEK rclone rc'si olur ve retry tetiklenebilir
+    (Windows cmd.exe'de pipefail yok, CRLF ve boş satırlar tolere edilir).
+    'Name' başlığı (lsjson tarzı çıktı) dizin adı sayılmaz.
+    """
+    names = []
+    for ln in (out or "").splitlines():          # splitlines CRLF'i de böler
+        toks = ln.split()
+        if len(toks) < 2:
+            continue
+        # rclone lsd biçimi: "<boyut> <tarih> <saat> <boyut> <ad...>" — ad 4.
+        # alandan sonra başlar ve boşluk içerebilir (son token almak adı
+        # kırpardı — QCode denetimi #3).
+        name = " ".join(toks[4:]) if len(toks) >= 5 else toks[-1]
+        if name and name.lower() != "name":
+            names.append(name)
+    return names
 
 
 def run_cmd(cmd, timeout=60, shell=False, retries=0):
@@ -1205,11 +1240,9 @@ def gdrive_snapshot(cfg, node=None):
 
         # find ile filtrele: include pattern'lerine uyan dosyaları topla
         # (29GB dizinlerde tar yerine find çok daha hızlı)
-        find_expr = []
-        for pat in include:
-            find_expr.append(f'-name "{pat}"')
-        find_cmd = " -o ".join(find_expr)
-        excl_find = " ".join(f"-not -path '*/{d}/*'" for d in excl)
+        # NOT (8 Eyl): find_cmd/excl_find artık kullanılmıyor — Python tarfile
+        # aşağıda _pack_node ile aynı işi yapıyor (Windows'ta find/head/tar
+        # boru hattı cmd.exe'ye düşüp rc=255 veriyordu).
 
         # Paketleme: Python tarfile (platformdan bağımsız).
         # Eski hal find|head|tar boru hattıydı — Windows'ta shell=True cmd.exe'ye
@@ -1265,7 +1298,7 @@ def announce(cfg, msg):
     os.makedirs(local, exist_ok=True)
     try:
         with open(os.path.join(local, fname), "w", encoding="utf-8", errors="replace") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+            f.write(f"[{_now_iso_utc()}] {msg}\n")
     except OSError:
         pass
     # Karşı tarafa form-POST dene
@@ -1350,7 +1383,7 @@ def cmd_push(cfg, node=None, dry_run=False, skip_unchanged=False):
             # Manifest'e build_break kaydı (farkındalık)
             mf = load_manifest(cfg)
             mf["build_break"] = {
-                "time": datetime.now().isoformat(),
+                "time": _now_iso_utc(),
                 "machine": cfg["machine"],
                 "new": len(new), "changed": len(changed),
             }
@@ -1372,11 +1405,11 @@ def cmd_push(cfg, node=None, dry_run=False, skip_unchanged=False):
         node_files = mf.setdefault("node_files", {})
         node_files[node] = {k: v for k, v in local.items()
                             if k.startswith(f"{node}/")}
-        mf["last_sync"] = datetime.now().isoformat()
+        mf["last_sync"] = _now_iso_utc()
         mf["machine"] = cfg["machine"]
     else:
         mf["files"] = local
-        mf["last_sync"] = datetime.now().isoformat()
+        mf["last_sync"] = _now_iso_utc()
         mf["machine"] = cfg["machine"]
 
     # AKILLI (v1.6): push sırasında kaynak + araç durumunu manifest'e ekle.
@@ -1384,7 +1417,7 @@ def cmd_push(cfg, node=None, dry_run=False, skip_unchanged=False):
     # CPU/GPU/RAM/disk kontrolünden geçirilir. Kurulum ASLA otomatik değil.
     mf["resources"] = resource_probe()
     mf["tools_state"] = scan_tools(cfg)
-    mf["probe_time"] = datetime.now().isoformat()
+    mf["probe_time"] = _now_iso_utc()
     save_manifest(cfg, mf)
 
     if gh_available():
@@ -1400,6 +1433,11 @@ def cmd_push(cfg, node=None, dry_run=False, skip_unchanged=False):
     if len(new) + len(changed) > 0:
         announce(cfg, f"Push{(' ['+node+']') if node else ''}: "
                       f"{len(new)} yeni, {len(changed)} değişen ({cfg['machine']})")
+
+    # v1.6.2: delta push — başarılı push sonrası parmak izini kaydet
+    if node and not dry_run:
+        save_last_push(cfg, node, node_fingerprint(cfg, node))
+    return 0
 
 
 def detect_changes_node(cfg, node):
@@ -1425,12 +1463,6 @@ def detect_changes_node(cfg, node):
         if path not in local:
             deleted.append(path)
     return new, changed, deleted, local
-
-
-    # v1.6.2: delta push — başarılı push sonrası parmak izini kaydet
-    if node and not dry_run:
-        save_last_push(cfg, node, node_fingerprint(cfg, node))
-    return 0
 
 
 def cmd_add_node(cfg, name, path, include="*", max_kb=1024):
@@ -1474,7 +1506,6 @@ def cmd_share(cfg, node, target_user):
     A kullanıcısının node'u → gdrive:hermes-sync/<target_user>/shared/<node>/
     Kullanım: python3 sync_motor.py share kernel --to ahmet
     """
-    import shutil as _shutil
     if node not in cfg["dirs"]:
         log.error(f"Bilinmeyen node: {node}")
         return
@@ -1509,9 +1540,9 @@ def cmd_nodes(cfg):
         ver_count = "?"
         if gd and rclone_available():
             out, rc = run_cmd(
-                f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{label} '
-                f'2>/dev/null | wc -l', timeout=30, shell=True)
-            ver_count = out.strip() if rc == 0 else "?"
+                f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{label}',
+                timeout=30, retries=1)
+            ver_count = str(len(_lsd_names(out))) if rc == 0 else "?"
         print(f"  {'🟢' if exists else '🔴'} {label:12s} "
               f"{'GDrive:'+str(ver_count)+' ver' if gd else 'lokal'}")
     print()
@@ -1530,8 +1561,8 @@ def cmd_select(cfg):
                 exists = True
                 break
         print(f"  [{i}] {'🟢' if exists else '🔴'} {label}")
-    print(f"  [0] TÜMÜ")
-    print(f"  [q] Çık")
+    print("  [0] TÜMÜ")
+    print("  [q] Çık")
 
     try:
         choice = input("\n  Seçim: ").strip().lower()
@@ -1557,34 +1588,55 @@ def cmd_select(cfg):
         log.error("Geçersiz seçim")
 
 
-def cmd_status(cfg):
+def cmd_status(cfg, json_mode=False):
+    import json as _j
+    peer = peer_status(cfg)
+    new, changed, deleted, local = detect_changes(cfg)
+    mf = load_manifest(cfg)
+    remote = gh_fetch_manifest(cfg)
+    rfiles = remote.get("files", {}) if remote else {}
+    conflicts = list_conflicts(cfg)
+
+    if json_mode:
+        # Makine-okunur JSON sözleşmesi (Hermes/izleme araçları için tek kanal)
+        data = {
+            "motor": f"sync_motor v{__version__}",
+            "machine": cfg["machine"],
+            "ts_utc": _now_iso_utc(),
+            "peer": peer,
+            "envanter": len(local),
+            "yeni": len(new), "degisen": len(changed), "silinen": len(deleted),
+            "manifest_kayit": len(mf.get("files", {})),
+            "last_sync": mf.get("last_sync"),
+            "remote_kayit": len(rfiles),
+            "uzaktan_gelecek": len([p for p in rfiles if p not in local]),
+            "cakisma": len(conflicts),
+            "son_kosu": last_run_summary(),
+        }
+        print(_j.dumps(data, ensure_ascii=False))
+        return data
+
     print("\n" + "═" * 60)
     print(f"  CUMULUS SYNC MOTOR v{__version__} — DURUM")
     print(f"  Makine: {cfg['machine']} ({ {'H1': 'H1 VPS', 'H2': 'H2 Desktop', 'H3': 'H3 Node', 'OPENCLAW': 'OpenClaw'}.get(cfg['machine'], cfg['machine']) })")
     print("═" * 60)
 
-    peer = peer_status(cfg)
     print(f"  Karşı taraf: {'🟢 ONLINE' if peer == 'ONLINE' else '🔴 OFFLINE'}")
 
-    new, changed, deleted, local = detect_changes(cfg)
     print(f"\n  Yerel envanter: {len(local)} dosya (filtrelenmiş)")
     print(f"  Yeni: {len(new)} | Değişen: {len(changed)} | Silinen: {len(deleted)}")
 
-    mf = load_manifest(cfg)
     print(f"  Manifest: {len(mf.get('files', {}))} kayıt, "
           f"son sync: {mf.get('last_sync', '—')}")
 
-    remote = gh_fetch_manifest(cfg)
     if remote:
-        rfiles = remote.get("files", {})
         local_paths = set(local.keys())
         remote_only = [p for p in rfiles if p not in local_paths]
         print(f"  GitHub manifest: {len(rfiles)} kayıt, "
               f"uzaktan gelecek: {len(remote_only)}")
     else:
-        print(f"  GitHub manifest: erişilemedi (gh auth kontrol)")
+        print("  GitHub manifest: erişilemedi (gh auth kontrol)")
 
-    conflicts = list_conflicts(cfg)
     print(f"  Çakışma: {len(conflicts)}")
     print("═" * 60 + "\n")
 
@@ -1598,21 +1650,27 @@ def gdrive_pull_latest(cfg, node):
         log.warning("rclone yok — GDrive pull atlandı")
         return False
 
-    # En son versiyon klasörünü bul
+    # En son versiyon klasörünü bul — pipeline YOK: rc GERÇEK rclone rc'si.
+    # (Eski `| tail -1` rc'yi tail'den alıyordu → retry hiç tetiklenmiyor ve
+    #  ağ hatası 'versiyon yok' gibi görünüyordu — v2.1.2 düzeltmesi.)
     out, rc = run_cmd(
-        f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{node} '
-        f'2>/dev/null | tail -1', timeout=30, shell=True)
-    if rc != 0 or not out:
+        f'rclone lsd {cfg["gdrive"]["versioned_dir"]}/{node}',
+        timeout=30, retries=1)
+    if rc != 0:
+        log.warning(f"{node}: GDrive versiyon listesi alınamadı "
+                    f"(rc={rc}, retry sonrası — pull atlandı)")
+        return False
+    names = _lsd_names(out)
+    if not names:
         log.info(f"{node}: ⚠ GDrive'da versiyon yok (pull atlandı — node yedeklenmemiş)")
         return False
     # En son timestamp klasörü
-    latest = out.split()[-1]
+    latest = names[-1]
     if not latest or not latest.replace("_", "").isdigit():
         log.warning(f"{node}: geçersiz versiyon klasörü: {latest}")
         return False
 
-    # Paketi çek
-    pkg = f"/tmp/sync_pull_{node}.tar.gz"
+    # Paketi çek (rclone copy dizin bazlı — .tar.gz değil, dizin kopyası)
     out, rc = run_cmd(
         f'rclone copy {cfg["gdrive"]["versioned_dir"]}/{node}/{latest}/ '
         f'/tmp/sync_pull_{node}/ --ignore-checksum --no-traverse '
@@ -1770,9 +1828,16 @@ def cmd_pull(cfg):
 
     to_pull = []
     conflicts = []
+    # sync_mode="backup" node'lar YALNIZ yedeklenir (push), pull edilmez —
+    # makineye özel yapılar (cron/kanban/a2a) çakışma üretmesin (8 Eyl kararı)
+    backup_nodes = {n for n, dc in (cfg.get("dirs") or {}).items()
+                    if dc.get("sync_mode") == "backup"}
     for path, rinfo in rfiles.items():
         if not _is_safe_path(path):
             log.warning(f"GÜVENLİK: tehlikeli yol reddedildi — {path}")
+            continue
+        node_seg = path.split("/", 1)[0]
+        if node_seg in backup_nodes:
             continue
         if path not in local:
             to_pull.append(path)
@@ -1805,10 +1870,12 @@ def cmd_pull(cfg):
                  "(repo: yolgezerahmet/cumulusos)")
 
     # GDrive'dan en son versiyonları çek (non-destructive)
+    # sync_mode="backup" node'lar burada ATLANIR (push-only yedek)
     log.info("GDrive versiyon çekme...")
     pulled = 0
     for label in cfg["dirs"]:
-        if cfg["dirs"][label].get("gdrive", False):
+        dc = cfg["dirs"][label]
+        if dc.get("gdrive", False) and dc.get("sync_mode", "bidir") != "backup":
             if gdrive_pull_latest(cfg, label):
                 pulled += 1
     if pulled:
@@ -1816,7 +1883,7 @@ def cmd_pull(cfg):
 
     # Manifest'e pull zamanı yaz
     mf = load_manifest(cfg)
-    mf["last_pull"] = datetime.now().isoformat()
+    mf["last_pull"] = _now_iso_utc()
     mf["remote_known"] = remote.get("last_sync")
     save_manifest(cfg, mf)
 
@@ -1846,7 +1913,7 @@ def cmd_probe(cfg):
     mf = load_manifest(cfg)
     mf["resources"] = res
     mf["tools_state"] = tools
-    mf["probe_time"] = datetime.now().isoformat()
+    mf["probe_time"] = _now_iso_utc()
     save_manifest(cfg, mf)
 
     print("\n  🧭 PROBE — Yerel Kaynaklar ve Araçlar\n")
@@ -2054,7 +2121,7 @@ def cmd_init(cfg):
         new, changed, deleted, local = detect_changes(cfg)
         mf = load_manifest(cfg)
         mf["files"] = local
-        mf["last_sync"] = datetime.now().isoformat()
+        mf["last_sync"] = _now_iso_utc()
         mf["machine"] = cfg["machine"]
         save_manifest(cfg, mf)
         gh_push_manifest(cfg, mf)
@@ -2120,7 +2187,7 @@ def run_with_retry(fn, *a, retries=1, **kw):
             else:
                 raise
 
-def cmd_agent_status(cfg):
+def cmd_agent_status(cfg, json_mode=False):
     """Hermes agent/otonom cron için JSON durum + öneri."""
     import json as _j
     conflicts = list_conflicts(cfg)
@@ -2128,6 +2195,7 @@ def cmd_agent_status(cfg):
     status = {
         "motor": f"sync_motor v{__version__}",
         "machine": cfg["machine"],
+        "ts_utc": _now_iso_utc(),
         "conflicts": len(conflicts),
         "conflict_files": conflicts[:10],
         "nodes": list(cfg["dirs"].keys()),
@@ -2146,7 +2214,10 @@ def cmd_agent_status(cfg):
     if lr and lr.get("rc", 0) != 0:
         rec.append(f"SON KOŞU HATALI: {lr.get('komut')} rc={lr.get('rc')} @ {lr.get('ts','?')[:19]}")
     status["recommendation"] = " | ".join(rec) if rec else "OK — eylem gerekmiyor"
-    print(_j.dumps(status, ensure_ascii=False, indent=2))
+    if json_mode:
+        print(_j.dumps(status, ensure_ascii=False))
+    else:
+        print(_j.dumps(status, ensure_ascii=False, indent=2))
 
 
 def last_run_summary():
@@ -2193,6 +2264,65 @@ def _motor_lock_path() -> str:
 
 MOTOR_LOCK = _motor_lock_path()
 RUN_STATE = os.path.expanduser("~/.hermes/state/sync_last_run.json")
+EVENTS_LOG = os.path.expanduser("~/.hermes/state/sync_events.log")
+
+# ── Hash önbelleği (8 Eyl): SHA256 her koşuda 198K dosyada hesaplanmasın.
+# mtime+size değişmediyse önceki SHA korunur. Manifest wire formatı DEĞİŞMEZ
+# (cache ayrı dosya). Yalnız scan_all kaydeder; test'ler doğrudan
+# scan_directory çağırır → cache'e yazmaz (izole).
+HASH_CACHE_PATH = os.path.expanduser("~/.hermes/state/hash_cache.json")
+_HASH_CACHE = {}
+_HASH_CACHE_MAX = 250000  # ~20MB üst sınır; aşarsa en eski %20 atılır
+
+
+def _load_hash_cache():
+    global _HASH_CACHE
+    if not _HASH_CACHE:
+        try:
+            if os.path.exists(HASH_CACHE_PATH):
+                with open(HASH_CACHE_PATH, encoding="utf-8", errors="replace") as f:
+                    _HASH_CACHE = json.load(f)
+        except Exception:
+            _HASH_CACHE = {}
+    return _HASH_CACHE
+
+
+def _save_hash_cache():
+    global _HASH_CACHE
+    if not _HASH_CACHE:
+        return
+    try:
+        if len(_HASH_CACHE) > _HASH_CACHE_MAX:
+            # en eski mtime'lı %20'yi at (bellek/disk şişmesin)
+            items = sorted(_HASH_CACHE.items(),
+                           key=lambda kv: kv[1].get("mtime", 0))
+            for k, _ in items[: len(items) // 5]:
+                _HASH_CACHE.pop(k, None)
+        os.makedirs(os.path.dirname(HASH_CACHE_PATH), exist_ok=True)
+        with open(HASH_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(_HASH_CACHE, f, ensure_ascii=False)
+    except Exception:
+        pass  # önbellek hatası taramayı kırmaz
+
+
+def _log_event(komut, rc, node=None, extra=None):
+    """Kalıcı olay akışı — sync_events.log (JSONL, append-only, UTC).
+    Analiz/izleme için: her komut koşusu satır olarak eklenir (sınırsız geçmiş)."""
+    import json as _j
+    try:
+        ev = {
+            "ts": _now_iso_utc(),
+            "komut": komut,
+            "rc": rc,
+            "node": node,
+            "machine": os.environ.get("SYNC_MACHINE", ""),
+            "extra": extra or {},
+        }
+        os.makedirs(os.path.dirname(EVENTS_LOG), exist_ok=True)
+        with open(EVENTS_LOG, "a", encoding="utf-8") as f:
+            f.write(_j.dumps(ev, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # olay logu asla komutu kırmaz
 
 # Bu komutlar GDrive/GitHub'a YAZAR → kilit zorunlu. Okuma komutları
 # (status/conflicts/versions/agent-status/nodes/doctor) kilitsiz çalışır.
@@ -2226,7 +2356,7 @@ def acquire_lock():
                 if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
                     return None
         fd.seek(0, 2)
-        fd.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+        fd.write(f"{os.getpid()} {_now_iso_utc()}\n")
         fd.flush()
         return fd
     except OSError:
@@ -2246,7 +2376,7 @@ def record_run(cfg, komut, rc, node=None, extra=None):
             except Exception:
                 hist = []
         hist.append({
-            "ts": datetime.now().isoformat(),
+            "ts": _now_iso_utc(),
             "komut": komut,
             "rc": rc,
             "node": node,
@@ -3257,6 +3387,8 @@ def main(argv=None):
                         help="apply: onay sormadan kur (varsayılan: interaktif onay)")
     parser.add_argument("--no-color", action="store_true",
                         help="renksiz çıktı")
+    parser.add_argument("--json", action="store_true",
+                        help="makine-okunur JSON çıktı (status/agent-status)")
     parser.add_argument("--skip-unchanged", action="store_true",
                         help="push/both: içerik değişmediyse node'u atla (delta, v1.6.2)")
     parser.add_argument("--hub", default=None,
@@ -3295,14 +3427,15 @@ def main(argv=None):
                   "(kilit aktif, /tmp/cumulus_sync.lock)", file=sys.stderr)
             return 0   # cron no_agent: exit 0 = sessiz atla; sorun değil
 
-    print(f"\n╔{'═'*58}╗")
-    print(f"║  CUMULUS SYNC MOTOR v{__version__} — {cfg['machine']}"
-          f"{' '*(34-len(cfg['machine']))}║")
-    print(f"╚{'═'*58}╝")
+    if not args.json:
+        print(f"\n╔{'═'*58}╗")
+        print(f"║  CUMULUS SYNC MOTOR v{__version__} — {cfg['machine']}"
+              f"{' '*(34-len(cfg['machine']))}║")
+        print(f"╚{'═'*58}╝")
 
     rc = 0
     if args.komut == "status":
-        cmd_status(cfg)
+        cmd_status(cfg, json_mode=args.json)
     elif args.komut == "push":
         cmd_push(cfg, node=args.node, dry_run=args.dry_run)
     elif args.komut == "pull":
@@ -3326,7 +3459,7 @@ def main(argv=None):
     elif args.komut == "conflicts":
         cmd_conflicts(cfg)
     elif args.komut == "agent-status":
-        cmd_agent_status(cfg)
+        cmd_agent_status(cfg, json_mode=args.json)
     elif args.komut == "discover":
         rc = cmd_discover(cfg, args.token)
     elif args.komut == "task":
@@ -3379,6 +3512,8 @@ def main(argv=None):
     # ── v1.6.4: son-koşu kaydı (mutating koşular + agent-status okuyucuları)
     if args.komut in MUTATING_CMDS and not args.dry_run:
         record_run(cfg, args.komut, rc, node=args.node)
+        _log_event(args.komut, rc, node=args.node,
+                   extra={"dry_run": args.dry_run, "json": args.json})
         if lock_fd is not None:
             try:
                 lock_fd.close()
@@ -3389,4 +3524,18 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # beklenmeyen hata — sessiz çökme YASAK (8 Eyl)
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            log.error("BEKLENMEYEN HATA: %s\n%s", e, tb)
+            _log_event("__hata__", 1, extra={"hata": str(e)[:200]})
+        except Exception:
+            pass
+        print(f"\n  ⚠ BEKLENMEYEN HATA: {e}", file=sys.stderr)
+        print("  Detay log'da: ~/.hermes/state/sync_motor.log", file=sys.stderr)
+        sys.exit(1)
