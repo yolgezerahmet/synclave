@@ -208,6 +208,56 @@ def run_memory() -> tuple:
         print(f"  ⚠ ortak hafıza rc={rc}: {err.strip()[:200]}")
     return rc, out, err
 
+def run_state() -> tuple:
+    """Ortak akıl (E modülü v2.1+): state.json'a HLC saatli durum bloğu yaz.
+
+    sync_common_knowledge modülünü doğrudan kullanır (rclone mock'suz gerçek
+    GDrive hub). Hata → fail-closed (rc 1) ama diğer once adımlarını bozmaz.
+    """
+    try:
+        sys.path.insert(0, str(MOTOR_DIR))
+        import sync_common_knowledge as ck
+        st = ck.update_state(machine_id(), {
+            "last_sync": "ok",
+            "last_run": now_iso(),
+        })
+        blocks = st.get("nodes", {})
+        print(f"  🧠 ORTAK AKIL: state.json güncellendi ({len(blocks)} makine blok)")
+        return 0, "", ""
+    except Exception as e:
+        print(f"  ⚠ ortak akıl rc=1: {str(e)[:200]}")
+        return 1, "", str(e)
+
+def run_tasks() -> tuple:
+    """ORTAK GÖREV DAĞITIMI + FAILOVER (v2.2): pending görevleri al, claim et.
+
+    Görevi İŞLEMEZ — sadece sahiplenir (işleme inbox_worker / Hermes yapar);
+    sahibi düşmüş running görevler stale devralma ile bu makineye geçer.
+    """
+    try:
+        sys.path.insert(0, str(MOTOR_DIR))
+        import sync_common_knowledge as ck
+        tasks = ck.list_tasks()
+        pending = [t for t in tasks if t.get("status") == "pending"]
+        claimed = 0
+        for t in pending:
+            r = ck.claim_task(t["task_id"], owner=machine_id(), allow_stale=True)
+            if r.get("status") == "running" and r.get("owner") == machine_id():
+                claimed += 1
+                print(f"    🤝 {t['task_id']} → {machine_id()} (claim)")
+        # düşen sahibin running görevlerini devral (failover)
+        for t in tasks:
+            if t.get("status") == "running" and t.get("owner") != machine_id():
+                r = ck.claim_task(t["task_id"], owner=machine_id(), allow_stale=True)
+                if r.get("status") == "running" and r.get("owner") == machine_id():
+                    print(f"    🔄 {t['task_id']} failover → {machine_id()} (attempt={r.get('attempt')})")
+        print(f"  📋 GÖREVLER: {len(pending)} pending, {claimed} claim, failover devralma yapıldı")
+        return 0, "", ""
+    except Exception as e:
+        print(f"  ⚠ görev rc=1: {str(e)[:200]}")
+        return 1, "", str(e)
+
+
 def run_once(do_sync=True, do_backup=True, do_memory=True, report=True):
     """Tek otonom koşu — cron/Task Scheduler bu fonksiyonu çağırır."""
     status = collect_status()
@@ -228,6 +278,13 @@ def run_once(do_sync=True, do_backup=True, do_memory=True, report=True):
         rc, out, err = run_memory()
         status["memory"] = {"rc": rc, "ts": now_iso(),
                             "out_tail": out.strip()[-200:], "err_tail": err.strip()[-200:]}
+    # ortak akıl (E): state.json HLC bloğu — sync'ten bağımsız, her koşuda
+    # v2.2: ortak görev dağıtımı + failover (run_state'ten sonra)
+    run_tasks()
+    if do_sync or do_backup or do_memory:
+        rc, out, err = run_state()
+        status["state"] = {"rc": rc, "ts": now_iso(),
+                           "out_tail": out.strip()[-200:], "err_tail": err.strip()[-200:]}
 
     # son-koşu kaydı (web paneli okur)
     try:

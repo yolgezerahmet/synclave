@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Kopya paritesi kapısı — sync_motor.py tek kanonik içerik olmalı (v2.5.0).
+"""Kopya paritesi kapısı — kök kopya ile paket kopyası ayrışmamalı (v2.5.0).
 
-Neden: 11 Eyl 2026'da dört kopya (public kök, public paket, private kök,
-private paket) FARKLI içerikteydi — biri `_lsd_names` düzeltmesini taşıyor,
-diğeri taşımıyordu; üretim kök kopyası (cron'un çalıştırdığı dosya) hâlâ
-`| wc -l` / `| tail -1` pipeline'larını kullanıyordu ve bu yüzden rclone
-retry hiç tetiklenmiyordu. Testler yalnız `synclave/sync_motor.py` dosyasını
-okuduğu için sapma GÖRÜNMEZDİ (yeşil test + bozuk üretim).
+Neden: 11 Eyl 2026'da ON ÜÇ ortak modülün dördü kök ile paket kopyası arasında
+AYRIŞMIŞTI (sync_motor.py 2.2.0 ↔ 2.3.2, node_agent.py, inbox_worker.py,
+conversation_bridge.py, gpu_agent.py). Üretim kök kopyası (cron'un çalıştırdığı
+dosya) v2.3.2'nin GDrive düzeltmesini taşımıyordu; `| wc -l` / `| tail -1`
+pipeline'ları rclone rc'sini yutuyor, retry hiç tetiklenmiyordu. Testler yalnız
+paket kopyasını okuduğu için sapma GÖRÜNMEZDİ (yeşil test + bozuk üretim).
 
 Bu kapı üç şeyi zorlar:
-  1. Aynı depoda kök `sync_motor.py` == `synclave/sync_motor.py` (byte).
-  2. Kritik semboller kanonik dosyada VAR (birleşim kaybı olmaz).
-  3. `__version__` tek değer ve CHANGELOG'un en üst sürümüyle aynı.
-
-İkiz depo (private `cumulus-sync-motor`) varsa, aynı sürümü beyan ettiği
-sürece byte-eşit olmalı. `SYNCLAVE_IKIZ_ZORUNLU=0` ile o kontrol kapatılır
-(ör. ikiz depo bilinçli olarak farklı bir dala bakıyorsa).
+  1. Kökte ve `synclave/` içinde bulunan HER ortak .py dosyası byte-eşit.
+  2. sync_motor.py kritik sembolleri + pipeline yasağı + tek `__version__`
+     (CHANGELOG'un en üst sürümüyle uyumlu).
+  3. İkiz depo (private `cumulus-sync-motor`) varsa aynı sürümü beyan ettiği
+     sürece kopyaları da byte-eşit. `SYNCLAVE_IKIZ_ZORUNLU=0` ile kapatılır.
 """
 import os
 import re
@@ -26,8 +24,9 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 KOK = REPO / "sync_motor.py"
 MODUL = REPO / "synclave" / "sync_motor.py"
+IKIZ_REPO = Path("/root/cumulus-sync-motor")
 
-# Birleşik kanonik içerikte bulunması ZORUNLU işaretler (sapma dedektörleri).
+# sync_motor.py kanonik içerikte bulunması ZORUNLU işaretler (sapma dedektörü).
 ZORUNLU_SEMBOLLER = (
     "def rclone_read(",
     "def _lsd_names(",
@@ -36,6 +35,7 @@ ZORUNLU_SEMBOLLER = (
     "def _log_event(",
     "def cmd_identity(",
     "def _is_idempotent_read(",
+    "_SURUM_ADI_RE",
     '"listremotes"',
     '"direxists"',
     '"about"',
@@ -46,18 +46,30 @@ def _oku(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _ikiz_kapali() -> bool:
+    return os.environ.get("SYNCLAVE_IKIZ_ZORUNLU", "1") == "0"
+
+
+def _ortak_moduller(repo: Path) -> list:
+    """Kökte VE pakette bulunan .py dosyaları (kopya olması gerekenler)."""
+    pkg = repo / "synclave"
+    return sorted(p.name for p in pkg.glob("*.py") if (repo / p.name).is_file())
+
+
 def test_ayni_depo_kopyalari_byte_esit():
-    """Kök (üretim) kopya ile paket kopyası ayrışırsa kırmızı."""
-    assert KOK.is_file() and MODUL.is_file(), "sync_motor.py kopyaları eksik"
-    kok, modul = _oku(KOK), _oku(MODUL)
-    if kok != modul:
-        sapan = [
-            f"kok {len(kok.splitlines())} satır / modul {len(modul.splitlines())} satır",
-        ]
-        for sem in ZORUNLU_SEMBOLLER:
-            if (sem in kok) != (sem in modul):
-                sapan.append(f"  yalnız birinde: {sem}")
-        pytest.fail("sync_motor.py kopyaları ayrıştı:\n" + "\n".join(sapan))
+    """Kök (üretim) kopya ile paket kopyası ayrışırsa kırmızı — tüm ortak modüller."""
+    ortak = _ortak_moduller(REPO)
+    assert ortak, "ortak modül bulunamadı (dizin yapısı değişmiş)"
+    ayri = []
+    for ad in ortak:
+        kok, modul = _oku(REPO / ad), _oku(REPO / "synclave" / ad)
+        if kok != modul:
+            satir = f"{ad}: kök {len(kok.splitlines())} / paket {len(modul.splitlines())} satır"
+            for sem in ZORUNLU_SEMBOLLER:
+                if (sem in kok) != (sem in modul):
+                    satir += f" | yalnız birinde: {sem}"
+            ayri.append(satir)
+    assert not ayri, "kök ↔ paket kopyaları ayrıştı:\n" + "\n".join(ayri)
 
 
 def test_kanonik_semboller_var():
@@ -92,16 +104,21 @@ def test_surum_tek_kaynak_ve_changelog_ile_uyumlu():
 
 
 def test_ikiz_depo_paritesi():
-    """Aynı sürümü beyan eden ikiz depo kopyası byte-eşit olmalı."""
-    if os.environ.get("SYNCLAVE_IKIZ_ZORUNLU", "1") == "0":
+    """Aynı sürümü beyan eden ikiz depo kopyaları byte-eşit olmalı (tüm ortak modüller)."""
+    if _ikiz_kapali():
         pytest.skip("ikiz depo parite kontrolü kapatıldı (SYNCLAVE_IKIZ_ZORUNLU=0)")
-    ikiz_kok = Path("/root/cumulus-sync-motor/sync_motor.py")
-    if not ikiz_kok.is_file():
+    if not (IKIZ_REPO / "sync_motor.py").is_file():
         pytest.skip("ikiz depo yok (bu makinede private kopya kurulu değil)")
-    ikiz_metin = _oku(ikiz_kok)
-    yerel_metin = _oku(MODUL)
-    if _surum(ikiz_metin) != _surum(yerel_metin):
-        pytest.skip(f"ikiz depo farklı sürümde ({_surum(ikiz_metin)}) — ayrı iş")
-    assert ikiz_metin == yerel_metin, (
-        "ikiz depo (private) kök kopyası ayrıştı — kurulum adımı atlanmış olabilir"
-    )
+    if _surum(_oku(IKIZ_REPO / "sync_motor.py")) != _surum(_oku(MODUL)):
+        pytest.skip(f"ikiz depo farklı sürümde — ayrı iş")
+    ayri = []
+    for ad in _ortak_moduller(REPO):
+        ikiz = IKIZ_REPO / "synclave" / ad
+        ikiz_kok = IKIZ_REPO / ad
+        if not ikiz.is_file() or not ikiz_kok.is_file():
+            continue
+        if _oku(REPO / "synclave" / ad) != _oku(ikiz):
+            ayri.append(f"{ad}: paket kopyaları ayrıştı")
+        if _oku(REPO / ad) != _oku(ikiz_kok):
+            ayri.append(f"{ad}: kök kopyaları ayrıştı")
+    assert not ayri, "ikiz depo parite sapması:\n" + "\n".join(ayri)

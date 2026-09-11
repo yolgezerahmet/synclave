@@ -15,9 +15,19 @@
   `_RETRY_READ_TOKENS` genişletmesi (`listremotes`/`direxists`/`about`),
   hash önbelleği + olay akışı (`_sha_cached`/`_log_event`) ve `cmd_identity`.
   Dört kopya artık byte-eşit (tek SHA-256).
-- **Regresyon kapısı (`tests/test_kopya_parite.py`):** kök ↔ paket byte
-  eşitliği, zorunlu sembol birleşimi, pipeline kalıntısı yasağı, tek
+- **Kapsam genişletildi — tüm ortak modüller:** aynı sapma sınıfı 13 ortak
+  modülün 4'ünde daha bulundu ve kapatıldı: `node_agent.py` (kök kopyada
+  `run_state`/`run_tasks` yoktu → ortak akıl + görev/failover üretimde devre
+  dışıydı), `inbox_worker.py` (pakette `_peer_ping`, `kontrol`, `temizle`
+  yoktu), `conversation_bridge.py` (pakette Windows `msvcrt` kilidi ve şema
+  toleranslı `PRAGMA` okuma yoktu), `gpu_agent.py` (pakette gömme-model
+  dışlayan `_pick_model` yoktu → `/api/generate` boş yanıt riski). İki depoda
+  13/13 ortak modül byte-eşit.
+- **Regresyon kapısı (`tests/test_kopya_parite.py`):** ortak modüllerin TAMAMI
+  için kök ↔ paket byte eşitliği (otomatik numaralandırma — yeni modül eklense
+  de kapsar), zorunlu sembol birleşimi, pipeline kalıntısı yasağı, tek
   `__version__` + CHANGELOG uyumu, ikiz depo (private) parite kontrolü.
+  Negatif kontrol: `sync_motor.py` ve `node_agent.py` mutasyonlarında kapı kırmızı.
 - **Bağımsız denetim (Nemotron-3-Ultra, $0) bulgusu — kapatıldı:** `rclone lsd`
   çıktı sırası garanti DEĞİL; eski kod çıktının son satırını "en yeni sürüm"
   sayıyordu (karışık sırada yanlış/eski sürüm çekilebilirdi). Yeni seçim

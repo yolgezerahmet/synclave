@@ -28,6 +28,7 @@ from pathlib import Path
 
 INBOX = os.path.expanduser("~/.hermes/a2a_inbox")
 CUMULUS_DIR = os.path.expanduser("~/cumulusos")
+SYNC_ROOT = os.path.expanduser("~/cumulus-sync-motor/p2p")
 UPDATE_REPO = os.path.expanduser(os.environ.get("A2A_UPDATE_REPO", "~/cumulus-sync-motor"))
 UPDATE_FILES = ("a2a_cli.py", "agent_mesh_a2a.py", "sync_motor.py", "inbox_worker.py")
 UPDATE_HOSTS = {"100.92.2.47", "127.0.0.1", "localhost"}
@@ -39,6 +40,8 @@ ALLOWLIST = {
     "ls": ["ls", "-la"],
     "git-status": ["git", "status", "--short"],
     "git-log": ["git", "log", "--oneline", "-5"],
+    "kontrol": ["true"],   # özel işleyici: inbox özeti (kuyruk durumu sorgusu)
+    "temizle": ["true"],   # özel işleyici: eski done/rejected temizliği
 }
 
 def run(cmd, timeout=600):
@@ -59,6 +62,14 @@ def parse_task(text):
         return "status", []
     if t == "uptime":
         return "uptime", []
+    if t == "ping" or t == "pong":
+        return "ping", []
+    if "disk" in t and "uptime" in t:
+        return "metric", []
+    if t == "kontrol":
+        return "kontrol", []
+    if t.startswith("temizle"):
+        return "temizle", t.split()[1:]
     if t.startswith("df"):
         return "df", []
     if t.startswith("test:"):
@@ -172,6 +183,29 @@ def run_agent_update(url, expected_sha256):
             shutil.copyfileobj(response, output)
         return apply_agent_update(archive, expected_sha256)
 
+def _peer_ping():
+    """KÜME SAĞLIĞI (31 Ağu): H1/H2 A2A health'ini ping'ler ve küçük bir durum
+    dosyasına yazar. Mevcut 5-dk'lık timer'ın İÇİNDE çalışır — ek proses/timer yok.
+    Kaynak: her peer için max 3s tek HTTP isteği (~saniyede bir kez, ihmal edilebilir)."""
+    peers = {"H1": "100.92.2.47", "H2": "100.76.82.46"}
+    durum = {}
+    for ad, ip in peers.items():
+        try:
+            req = urllib.request.Request(f"http://{ip}:8643/health", method="GET")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                g = json.loads(r.read())
+                durum[ad] = {"up": g.get("status") == "ok", "ts": time.time()}
+        except Exception:
+            durum[ad] = {"up": False, "ts": time.time()}
+    try:
+        p = os.path.join(SYNC_ROOT, "_mesh_status.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        json.dump(durum, open(p, "w"))
+    except Exception:
+        pass
+    return durum
+
+
 def process_inbox():
     os.makedirs(INBOX, exist_ok=True)
     done = 0
@@ -200,6 +234,66 @@ def process_inbox():
             elif key == "agent-update":
                 d["result"] = run_agent_update(args[0]["url"], args[0]["sha256"])
                 d["status"] = "done"
+            elif key == "ping":
+                # H1/H2 sağlık testi (1 Eyl 2026): pong + temel durum döner
+                d["status"] = "done"
+                d["result"] = {"pong": True, "host": __import__("socket").gethostname(),
+                               "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            elif key == "metric":
+                # Metrik sorgusu: disk + uptime birlikte raporlanır (H1'in
+                # 'metric-test-*' deseni; allowlist dışı kalmaması için eklendi)
+                d1 = run(["df", "-h", "/"])
+                d2 = run(["uptime"])
+                d["status"] = "done"
+                d["result"] = {"disk": d1[-800:], "uptime": d2[-300:]}
+            elif key == "kontrol":
+                # AKILLI KUYRUK SORGUSU (31 Ağu 2026): inbox özeti döndürür —
+                # ajanlar kuyruk durumunu SSH'sız A2A'dan görebilir.
+                yeni = tamam = red = 0
+                son = []
+                for kf in sorted(glob.glob(os.path.join(INBOX, "*.json"))):
+                    try:
+                        kd = json.loads(open(kf, encoding="utf-8").read())
+                        st = kd.get("status", "?")
+                        if st == "new":
+                            yeni += 1
+                        elif st == "done":
+                            tamam += 1
+                        elif st == "rejected":
+                            red += 1
+                        son.append({"id": os.path.basename(kf), "status": st,
+                                    "from": kd.get("from", "")[:16],
+                                    "text": str(kd.get("text", ""))[:60]})
+                    except Exception:
+                        pass
+                son = son[-5:]
+                d["status"] = "done"
+                # Küme sağlığı da özetlenir (H1/H2 up/down + son ping)
+                try:
+                    ms = json.loads(open(os.path.join(SYNC_ROOT, "_mesh_status.json")).read())
+                    d["result"] = {"toplam": yeni + tamam + red, "new": yeni,
+                                   "done": tamam, "rejected": red, "son_5": son,
+                                   "mesh": ms}
+                except Exception:
+                    d["result"] = {"toplam": yeni + tamam + red, "new": yeni,
+                                   "done": tamam, "rejected": red, "son_5": son}
+            elif key == "temizle":
+                # Kuyruk hijyeni (31 Ağu 2026): done/rejected dosyaları N günden
+                # eskiyse siler (varsayılan 7 gün). new ASLA silinmez.
+                gun = int(args[0]) if args and args[0].isdigit() else 7
+                esik = time.time() - gun * 86400
+                silinen = 0
+                for kf in glob.glob(os.path.join(INBOX, "*.json")):
+                    try:
+                        kd = json.loads(open(kf, encoding="utf-8").read())
+                        if kd.get("status") in ("done", "rejected") and \
+                           os.path.getmtime(kf) < esik:
+                            os.remove(kf)
+                            silinen += 1
+                    except Exception:
+                        pass
+                d["status"] = "done"
+                d["result"] = {"silinen": silinen, "esik_gun": gun}
             else:
                 cmd = list(ALLOWLIST[str(key)])
                 if key == "ls" and args:
@@ -233,4 +327,5 @@ def process_inbox():
     return done
 
 if __name__ == "__main__":
+    _peer_ping()      # küme sağlık kaydı (5 dk'da bir, ek kaynak yok)
     process_inbox()

@@ -21,7 +21,11 @@ CRON (no_agent, 15 dk):
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows — fcntl yok
+    fcntl = None
+    import msvcrt
 import hashlib
 import json
 import os
@@ -65,7 +69,10 @@ def _acquire_lock():  # -> int | None
     try:
         Path(_LOCK_FILE).parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:  # Linux/macOS
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # Windows — msvcrt ile dosyayı kilitle
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         return fd
     except OSError:
         return None
@@ -87,8 +94,12 @@ def _save_wm(wm: dict):
 
 def _sessions(conn: sqlite3.Connection) -> dict:
     """session_id → (source, user_id, chat_id, title)"""
-    rows = conn.execute(
-        "SELECT id, source, user_id, chat_id, title FROM sessions").fetchall()
+    # NOT: Hermes state.db şema varyantları arasında 'chat_id' sütunu HER sürümde
+    # yoktur (bazı sürümlerde user_id tek kanal kimliğidir). Eksikse boş geç.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    sel = ", ".join(c if c in cols else "'' AS %s" % c
+                    for c in ("id", "source", "user_id", "chat_id", "title"))
+    rows = conn.execute("SELECT %s FROM sessions" % sel).fetchall()
     out = {}
     for sid, source, uid, chat_id, title in rows:
         src = (source or "cli").lower()
@@ -152,10 +163,13 @@ def main(argv=None):
     total_conv = len(conv_map)
     # 2) Mesajları tek sorguda, tüm session'lar için (id sıralı)
     state.row_factory = sqlite3.Row
+    # NOT: 'active' sütunu bazı Hermes sürümlerinde yoktur — varsa filtrele, yoksa atla.
+    mcols = {r[1] for r in state.execute("PRAGMA table_info(messages)")}
+    active_f = "AND m.active=1" if "active" in mcols else ""
     q = state.execute(
         "SELECT m.id, m.session_id, m.role, m.content, m.timestamp "
-        "FROM messages m WHERE m.active=1 AND m.content IS NOT NULL "
-        "ORDER BY m.id ASC")
+        "FROM messages m WHERE m.content IS NOT NULL %s "
+        "ORDER BY m.id ASC" % active_f)
     # 3) Session başına watermark filtresi + CONV başına seq takibi.
     #    KRİTİK: binlerce session AYNI kullanıcı+kanala (aynı conv_id'ye) akar;
     #    seq conv genelinde monoton olmalı — yoksa msg_id çakışır ve
