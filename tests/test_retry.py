@@ -326,6 +326,50 @@ def test_no_pipeline_in_gdrive_reads_source_guard():
     assert "2>/dev/null | tail -1" not in src
 
 
+def test_gdrive_pull_latest_cikti_sirasi_garanti_degil(monkeypatch):
+    """rclone lsd çıktı SIRASI garanti değil → en yeni timestamp sözlük sırasıyla.
+
+    Bağımsız denetim bulgusu (11 Eyl 2026): eski kod çıktının son satırını
+    (`names[-1]`) en yeni sanıyordu; rclone sıralamayı garanti etmediği için
+    karışık sıralı çıktıda YANLIŞ (eski) sürüm çekilebilirdi. Yeni seçim
+    YYYYMMDD_HHMMSS biçimli adlar içinden `max()` — sıradan bağımsız.
+    """
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    calls = []
+    # Bilinçli KARIŞIK sıra + gürültü: boş satır, tek token'lu satır,
+    # 'Name' başlıklı satır, biçimsiz dir adı, en ESKİ sürüm EN SONDA.
+    ls_out = (
+        "   -1 2026-09-02 01:39:11        -1 20260902_013911\r\n"
+        "   -1 2026-09-10 19:17:33        -1 20260910_191733\r\n"
+        "Name         -1 2026-09-11 07:00:00        -1 20260911_070000\r\n"
+        "\r\n"
+        "   -1 2026-09-01 13:27:04        -1 20260901_132704\n"
+        "   -1 2026-09-05 08:00:00        -1 bozuk_dizin\n"
+    )
+
+    def fake_run_cmd(cmd, timeout=60, shell=False, retries=0, **kw):
+        calls.append((cmd, shell, retries))
+        if cmd.startswith("rclone lsd"):
+            return ls_out, 0
+        return "", 1          # copy adımı bilinçli başarısız (GDrive'a yazmıyoruz)
+
+    monkeypatch.setattr(sm, "run_cmd", fake_run_cmd)
+    assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    # çıktının SON satırı değil, en BÜYÜK timestamp seçilmeli
+    assert "20260910_191733" in calls[1][0]
+    assert "20260901_132704" not in calls[1][0]
+
+
+def test_gdrive_pull_latest_tamamen_gecersiz_liste_uyarir(monkeypatch, caplog):
+    """Hiç geçerli timestamp dizini yoksa: retry edilmiş liste + warning (fail-closed)."""
+    monkeypatch.setattr(sm, "rclone_available", lambda: True)
+    monkeypatch.setattr(sm, "run_cmd",
+                        lambda *a, **k: ("   -1 2026-09-05 08:00:00 -1 bozuk\n", 0))
+    with caplog.at_level("WARNING"):
+        assert sm.gdrive_pull_latest(_pull_cfg(), "scripts") is False
+    assert any("geçersiz versiyon" in r.message for r in caplog.records)
+
+
 # ─── v2.1.2: rclone_read — doğrudan subprocess OKUMALARI retry kapsamında ──
 
 def _patch_subprocess(monkeypatch, mod, fake):

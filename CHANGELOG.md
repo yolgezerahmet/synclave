@@ -18,9 +18,16 @@
 - **Regresyon kapısı (`tests/test_kopya_parite.py`):** kök ↔ paket byte
   eşitliği, zorunlu sembol birleşimi, pipeline kalıntısı yasağı, tek
   `__version__` + CHANGELOG uyumu, ikiz depo (private) parite kontrolü.
+- **Bağımsız denetim (Nemotron-3-Ultra, $0) bulgusu — kapatıldı:** `rclone lsd`
+  çıktı sırası garanti DEĞİL; eski kod çıktının son satırını "en yeni sürüm"
+  sayıyordu (karışık sırada yanlış/eski sürüm çekilebilirdi). Yeni seçim
+  `YYYYMMDD_HHMMSS` biçimli adlar içinden `max()` — sıradan bağımsız;
+  biçimsiz dizin adları sessizce elenir, hepsi geçersizse warning + fail-closed.
+  Regresyon: `test_gdrive_pull_latest_cikti_sirasi_garanti_degil` (karışık
+  sıralı + CRLF + gürültü satırlı çıktı) ve `..._tamamen_gecersiz_liste_uyarir`.
 - **Paket sürümü:** `pyproject.toml` iki depoda hizalandı (public 1.0.1,
   private 2.4.1 → **1.0.2**); PyPI hattı tek (synclave).
-- Test: 212 PASS (public 208 → +4 parite; private 211 → +1).
+- Test: public 215 PASS, private 218 PASS.
 
 ## [2.3.2] — 2026-09-10 (rclone OKUMA retry kapsamı tamamlandı)
 

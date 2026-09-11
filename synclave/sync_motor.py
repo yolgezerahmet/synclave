@@ -1664,11 +1664,16 @@ def gdrive_pull_latest(cfg, node):
     if not names:
         log.info(f"{node}: ⚠ GDrive'da versiyon yok (pull atlandı — node yedeklenmemiş)")
         return False
-    # En son timestamp klasörü
-    latest = names[-1]
-    if not latest or not latest.replace("_", "").isdigit():
-        log.warning(f"{node}: geçersiz versiyon klasörü: {latest}")
+    # En son sürüm: rclone lsd çıktı SIRASI GARANTİ DEĞİL (bağımsız denetim
+    # bulgusu, 11 Eyl 2026) → yalnız YYYYMMDD_HHMMSS biçimindeki adlar alınır ve
+    # sözlük sırasına göre en büyüğü seçilir (bu biçimde sözlük sırası =
+    # kronolojik sıra). Bozuk/ilgisiz dizin adları sessizce atlanır.
+    gecerli = [n for n in names
+               if len(n) == 15 and n.replace("_", "").isdigit()]
+    if not gecerli:
+        log.warning(f"{node}: geçersiz versiyon klasörü: {names[-1]}")
         return False
+    latest = max(gecerli)
 
     # Paketi çek (rclone copy dizin bazlı — .tar.gz değil, dizin kopyası)
     out, rc = run_cmd(
