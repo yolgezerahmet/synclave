@@ -55,6 +55,31 @@ RUN_STATE = Path(os.path.expanduser("~/.hermes/state/sync_last_run.json"))
 GDRIVE_HUB = "gdrive:hermes-sync"
 DEFAULT_USER = "hahmet"
 
+# ── Adım bütçesi (v2.5.1) ─────────────────────────────────────
+# Neden: dış kapı (cron `run-node-agent.sh`) 3600s'te script'i ÖLDÜRÜR. İç
+# zaman aşımı dış kapıya EŞİTSE (eski: backup timeout=3600) adım kendi hatasını
+# hiçbir zaman yazamaz: 14 ardışık koşu boş log + "Script timed out after
+# 3600s" ile düştü ve HİÇBİR teşhis kalmadı (ölçüm 11 Eyl 2026: sync 6.7 dk'da
+# bitti, backup 53+ dk sürdü → dış kapı vurdu). Bu yüzden her iç bütçe dış
+# kapının ALTINDA ve toplamları dış kapının altında tutulur.
+# Regresyon kapısı: tests/test_node_agent_butce.py
+DIS_KAPI_S = 3600
+BUTCE_SYNC_S = 900          # ölçülen: 'both' ~7 dk (6.7 dk) → 15 dk bol pay
+BUTCE_BACKUP_S = 1800       # restic/GDrive; aşılırsa RAPOR EDİLİR (sessiz ölüm yok)
+BUTCE_MEMORY_S = 240
+BUTCE_DIGER_S = 300         # status + tasks + state + hub raporu payı
+BUTCE_VARSAYILAN_S = 1800   # motor() varsayılanı — çağrı açık timeout vermezse
+BUTCE_KISA_S = 120          # kısa probe'lar (conflicts listesi gibi)
+
+# Log dosyasına yönlendirildiğinde Python stdout'u BLOK tamponlar → dış kapı
+# tarafından öldürülen koşu BOŞ log bırakır. Satır tamponu şart (teşhis).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+
 def machine_id() -> str:
     """Makine kimliği: hostname (H1=cumulusnet-hermes-1, H2=sistemg16)."""
     try:
@@ -79,8 +104,8 @@ def run(cmd, timeout=600, cwd=None):
     except Exception as e:
         return -1, "", str(e)
 
-def motor(*args, timeout=1800):
-    """sync_motor.py komutu sarmalayıcı."""
+def motor(*args, timeout=BUTCE_VARSAYILAN_S):
+    """sync_motor.py komutu sarmalayıcı — varsayılan da DIŞ KAPININ altında."""
     return run([sys.executable, str(MOTOR), *args], timeout=timeout)
 
 def load_config():
@@ -102,7 +127,7 @@ def collect_status() -> dict:
     cfg = load_config()
     hist = read_run_state()
     last = hist[-1] if hist else None
-    rc, out, err = motor("conflicts", timeout=120)
+    rc, out, err = motor("conflicts", timeout=BUTCE_KISA_S)
     conflicts = [l.strip() for l in out.splitlines() if ".conflict" in l] if rc == 0 else []
     return {
         "ts": now_iso(),
@@ -167,7 +192,7 @@ def run_sync() -> tuple:
     use_delta = _ver_tuple(ver) >= (1, 6, 2)
     args = ["both", "--skip-unchanged"] if use_delta else ["both"]
     print(f"  🔄 EŞİTLE: sync_motor {' '.join(args)}  (motor v{ver})")
-    rc, out, err = motor(*args, timeout=1200)
+    rc, out, err = motor(*args, timeout=BUTCE_SYNC_S)
     if rc == 0:
         print("  ✅ eşitleme tamam")
     else:
@@ -188,7 +213,7 @@ def run_backup() -> tuple:
         print("  💾 YEDEK: motor eski (no-op — GDrive snapshot both içinde)")
         return 0, "", "backup yalnız v1.6.3+ — no-op"
     print("  💾 YEDEK: sync_motor backup")
-    rc, out, err = motor("backup", timeout=3600)
+    rc, out, err = motor("backup", timeout=BUTCE_BACKUP_S)
     if rc == 0:
         print("  ✅ yedek tamam")
     else:
@@ -201,7 +226,7 @@ def run_memory() -> tuple:
         print("  🧠 ORTAK HAFIZA: motor eski (no-op — memory yalnız v2.1+)")
         return 0, "", "memory yalnız v2.1+ — no-op"
     print("  🧠 ORTAK HAFIZA: sync_motor memory")
-    rc, out, err = motor("memory", timeout=600)
+    rc, out, err = motor("memory", timeout=BUTCE_MEMORY_S)
     if rc == 0:
         print("  ✅ ortak hafıza tamam")
     else:
@@ -258,25 +283,48 @@ def run_tasks() -> tuple:
         return 1, "", str(e)
 
 
+def _adim(ad, fn):
+    """Adımı SÜRE ölçerek çalıştır — log'da 'başladı / bitti rc süre' görünür.
+
+    Neden (v2.5.1): dış kapı 3600s'te koşuyu öldürdüğünde HANGİ adımın takıldığı
+    bilinmiyordu (boş log + 14 ardışık "Script timed out"). Satır tamponlu
+    stdout + adım süresi birlikte teşhisi mümkün kılar: log'un son satırı
+    ölüm anındaki adımı gösterir.
+    """
+    t0 = time.time()
+    print(f"  ▶ {ad} başladı", flush=True)
+    try:
+        rc, out, err = fn()
+    except Exception as e:                      # adım hatası koşuyu düşürmez
+        rc, out, err = 1, "", str(e)
+    sure = time.time() - t0
+    print(f"  ◀ {ad} bitti rc={rc} {sure:.1f}s", flush=True)
+    return rc, out, err, sure
+
+
 def run_once(do_sync=True, do_backup=True, do_memory=True, report=True):
-    """Tek otonom koşu — cron/Task Scheduler bu fonksiyonu çağırır."""
+    """Tek otonom koşu — cron/Task Scheduler bu fonksiyonu çağırır.
+
+    Adım bütçeleri (BUTCE_*) dış kapının (DIS_KAPI_S=3600s) ALTINDADIR: bir adım
+    bütçesini aşarsa rc=-1 ile RAPOR EDİLİR ve koşu rapor/state adımlarına
+    devam eder (sessiz ölüm yok).
+    """
     status = collect_status()
     print(f"╔{'═'*52}╗")
     print(f"║ NODE AGENT — {machine_id().upper()} ({platform.system()})  {now_iso()[:19]} ║")
     print(f"╚{'═'*52}╝")
 
     if do_sync:
-        status["sync"] = {}
-        rc, out, err = run_sync()
-        status["sync"] = {"rc": rc, "ts": now_iso(),
+        rc, out, err, sure = _adim("sync", run_sync)
+        status["sync"] = {"rc": rc, "ts": now_iso(), "sure_s": round(sure, 1),
                           "out_tail": out.strip()[-200:], "err_tail": err.strip()[-200:]}
     if do_backup:
-        rc, out, err = run_backup()
-        status["backup"] = {"rc": rc, "ts": now_iso(),
+        rc, out, err, sure = _adim("backup", run_backup)
+        status["backup"] = {"rc": rc, "ts": now_iso(), "sure_s": round(sure, 1),
                             "out_tail": out.strip()[-200:], "err_tail": err.strip()[-200:]}
     if do_memory:
-        rc, out, err = run_memory()
-        status["memory"] = {"rc": rc, "ts": now_iso(),
+        rc, out, err, sure = _adim("memory", run_memory)
+        status["memory"] = {"rc": rc, "ts": now_iso(), "sure_s": round(sure, 1),
                             "out_tail": out.strip()[-200:], "err_tail": err.strip()[-200:]}
     # ortak akıl (E): state.json HLC bloğu — sync'ten bağımsız, her koşuda
     # v2.2: ortak görev dağıtımı + failover (run_state'ten sonra)

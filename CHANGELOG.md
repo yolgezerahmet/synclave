@@ -39,12 +39,52 @@
   `test_msvcrt_mevcut_kayit_korunur_ve_buyumez` (Windows yolu).
   Public 234 test PASS; private ikiz depoda aynı ağaç.
 
+- **Bulgu 3 (ÜRETİM — ölçüldü: iç bütçe dış kapıya eşitti → teşhissiz ölüm):**
+  `node-agent-otonom` cron'u (8b1a738e790c, 90 dk) **14 ardışık koşuda** düştü:
+  `last_status=error`, `last_error="Script timed out after 3600s"`,
+  `failure_streak=14` ve `/tmp/node_agent.log` **BOŞ (0 bayt)** — teşhis yok.
+  Ölçüm: motorun kendi kaydı `both rc=0` (19:19:53 yerel, koşu 19:13'te başladı
+  → sync 6.7 dk), ardından **backup 53+ dk** sürdü ve 3600s'te cron script'i
+  öldürdü. Kök neden: `node_agent.run_backup()` iç zaman aşımı `3600s` — dış
+  kapıya EŞİT; adım kendi "TIMEOUT" satırını hiçbir zaman yazamadı. İkinci
+  katman: çıktı dosyaya yönlendirilince Python stdout'u BLOK tamponlar → ölen
+  koşu boş log bırakır.
+
+- **Düzeltme (node_agent v2.5.1):** adım bütçeleri dış kapının ALTINA indirildi
+  ve adlandırıldı — `BUTCE_SYNC_S=900`, `BUTCE_BACKUP_S=1800`,
+  `BUTCE_MEMORY_S=240`, `BUTCE_DIGER_S=300`, `BUTCE_VARSAYILAN_S=1800`,
+  `BUTCE_KISA_S=120` (toplam 3240s < `DIS_KAPI_S=3600s`); motor çağrılarındaki
+  çıplak sabitler kaldırıldı. Aşan adım artık `rc=-1` ile **rapor edilir** ve
+  koşu state/rapor adımlarına devam eder. `stdout/stderr` satır tamponlu
+  (`reconfigure(line_buffering=True)`) + her adım `▶ başladı / ◀ bitti rc süre`
+  satırı yazar ve `status.json`'a `sure_s` alanı girer → hangi adımın takıldığı
+  log'un son satırından görünür. Cron sarmalayıcısı `python3 -u` ile çalışır
+  (`scripts/run-node-agent.sh`, artık depoda sürümlü).
+
+- **Regresyon kapısı (`tests/test_node_agent_butce.py`, 7 test):** her bütçe <
+  dış kapı, toplam bütçe < dış kapı (aşarsa koşu yine teşhissiz ölür), motor
+  çağrılarında çıplak `timeout=` yasağı (KOD; yorumlar muaf), satır tamponu
+  zorunlu, gerçek timeout `rc=-1 + "TIMEOUT 1s"` üretir, `_adim` süre ölçer ve
+  adım hatasını yuta. Negatif kontrol: kapı **eski koddaki 5 çağrının tamamını**
+  reddeder. Public 241 test PASS (229 temel + 5 kilit + 7 bütçe), private ikiz
+  240 PASS + 1 beklenen skip.
+
 - **Bağımsız denetim:** OceanAPI (gpt-5.6-sol) 3 denemede HTTP 504 verdi →
   ücretsiz denetçi Nemotron-3-Ultra-550B (NVIDIA) ile denetlendi; iki kök
   neden doğrulandı, kayıt-yazımı riski (R5) kapatıldı. Denetçinin
   "`msvcrt.locking` 1 bayt → truncate sonrası kilit görünmez olur" iddiası
   **kabul edilmedi** (kilit aralığı truncate ile düşmez; kanıtsız) — bunun
   yerine truncate tamamen kaldırıldı, böylece tartışma konusu ortadan kalktı.
+  DONE-CHECK öncesi son denetim turu (aynı gün) 504/503 ile alınamadı —
+  kilit düzeltmesi için yapılan önceki tur ve yedi testlik yerel kapı esas
+  alındı; **raporda açıkça belirtildi**.
+
+- **AÇIK KALEM (düzeltilmedi, yalnız görünür kılındı):** backup adımı neden 53+
+  dk sürüyor (restic/GDrive) — kök neden araştırması ayrı iş. Ayrıca üretim
+  kanıtı: `/tmp/cumulus_sync.lock` 11 Eyl 19:24'te **0 bayt** kalmıştı (kilit
+  çekişmesinde kaybeden adayın sahibin kaydını sildiğinin canlı izi);
+  düzeltmeden sonra aynı çekişmede dosya 64 baytlık kayıtla kalmalı —
+  sonraki çekişmeli koşuda doğrulanacak.
 
 - **Kapsam dışı bırakılan (kayıtlı):** `smart_sync.py` (kök, eski motor) aynı
   `open(..., "w")` desenini taşır; hiçbir cron/systemd birimi tarafından
