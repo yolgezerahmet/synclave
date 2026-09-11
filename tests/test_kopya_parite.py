@@ -103,6 +103,36 @@ def test_surum_tek_kaynak_ve_changelog_ile_uyumlu():
     )
 
 
+def test_paket_surumu_tek_kaynak_pyproject_paket_motor():
+    """pyproject / paket __init__ / motor / CHANGELOG en üst sürümü AYNI olmalı.
+
+    Neden (11 Eyl 2026 bulgusu — gerçek sapma): pyproject `1.0.2`, paket
+    `__init__.__version__` `1.0.1`, `sync_motor.__version__` `2.5.0`, PyPI'da
+    yayınlanmış en yüksek sürüm ise `2.4.1` idi. Sürümler ayrışınca iki gerçek
+    sonuç doğar: (1) paket kendini yanlış sürümle tanıtır, (2) bu ağaçtan
+    yayın yapılırsa sürüm numarası yayındaki `2.4.1`'in ALTINDA kalır ve
+    `pip install synclave` yeni sürümü ÇEKMEZ (resolver en yükseği seçer).
+    Bu kapı dört kaynağı tek değere bağlar.
+    """
+    paket_v = _surum(_oku(REPO / "synclave" / "__init__.py"))
+    motor_v = _surum(_oku(KOK))
+    pypro = _oku(REPO / "pyproject.toml")
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pypro)
+    assert m, "pyproject.toml'da [project] version bulunamadı"
+    basliklar = re.findall(r"^## \[(\d+\.\d+\.\d+)\]",
+                           _oku(REPO / "CHANGELOG.md"), re.M)
+    assert basliklar, "CHANGELOG'da sürüm başlığı yok"
+    degerler = {
+        "pyproject": m.group(1),
+        "paket __init__": paket_v,
+        "sync_motor": motor_v,
+        "CHANGELOG[0]": basliklar[0],
+    }
+    assert len(set(degerler.values())) == 1, (
+        f"sürüm kaynakları ayrıştı (tek kaynak olmalı): {degerler}"
+    )
+
+
 def test_ikiz_depo_paritesi():
     """Aynı sürümü beyan eden ikiz depo kopyaları byte-eşit olmalı (tüm ortak modüller)."""
     if _ikiz_kapali():

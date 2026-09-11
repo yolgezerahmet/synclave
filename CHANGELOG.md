@@ -45,6 +45,36 @@
   private 2.4.1 → **1.0.2**); PyPI hattı tek (synclave).
 - Test: public 216 PASS, private 219 PASS.
 
+### Ek — 11 Eyl 2026, ikinci tur (sessiz doğrulama açıkları)
+
+- **SÜRÜM DÜZELTMESİ (önceki karar revize):** 1.0.2 hizalaması PyPI'daki
+  YAYINLANMIŞ en yüksek sürümün (2.4.1, 8 Eyl) ALTINDA kalıyordu; bu ağaçtan
+  yayın yapılsa `pip install synclave` yeni sürümü ÇEKMEZDİ (resolver en
+  yükseği seçer). Dört kaynak tek değere bağlandı: `pyproject`, paket
+  `__init__.__version__`, `sync_motor.__version__`, `CHANGELOG[0]` = **2.5.0**.
+  Kanıt: wheel build → `synclave-2.5.0-py3-none-any.whl`, METADATA `Version: 2.5.0`.
+  Kapı: `test_paket_surumu_tek_kaynak_pyproject_paket_motor` (negatif kontrol:
+  pyproject 1.0.2'ye çekilince kırmızı).
+- **KOŞMAYAN DOĞRULAMA KAPATILDI:** kökteki 6 self-check betiği
+  (`test_memory_cmd`, `test_memory_fixes`, `test_retention_cmd`, `test_sec_fixes`,
+  `test_sync_memory`, `test_versions_cmd` — 74 doğrulama) hiçbir runner
+  tarafından çağrılmıyordu. `tests/test_legacy_scripts.py` bunları subprocess ile
+  koşturur: `rc=0` **ve** `<N> PASS` özeti, hata işareti yasağı. Negatif
+  kontroller: betik kaybolunca kırmızı, `rc=0` + özet yok → kırmızı.
+- **PRIVATE DEPODA HİÇ TEST KOŞMUYORDU (gerçek bulgu):** betikler private
+  kopyada `tests/manual/` altında; pytest bunları COLLECT edince modül
+  seviyesindeki `sys.exit(0)` yüzünden `INTERNALERROR: SystemExit: 0` →
+  `no tests collected`. Çözüm: `tests/manual/conftest.py` → `collect_ignore_glob`
+  (pytest global `norecursedirs` varsayılanları EZİLMEZ). Private suite artık
+  koşuyor: 228 PASS, 1 skip.
+- **BETİK YERLEŞİMİ:** iki depodaki kopyalar ayrışmıştı; private kopyadaki
+  `dirname(dirname(...))` bir fazla seviye gösterdiği için betikler private'ta
+  `ModuleNotFoundError` ile hiç koşamıyordu. `sys.path` bloğu yerleşimden
+  bağımsız hale getirildi (işaret dosyası `sync_motor.py` yukarı doğru aranır;
+  kök + `<kök>/synclave` eklenir) ve iki depo kopyaları byte-eşitlendi
+  (`test_self_check_betikleri_ikiz_depo_ile_ayni`).
+- Test: public **229 PASS**, private **228 PASS + 1 skip**.
+
 ## [2.3.2] — 2026-09-10 (rclone OKUMA retry kapsamı tamamlandı)
 
 - **Kapatan modül (GÖREV 1 artığı):** `sync_motor.py` içinde `subprocess.run`
