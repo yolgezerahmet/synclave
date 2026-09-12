@@ -338,3 +338,52 @@ def test_gecici_yollar_platformdan_turetilir():
     assert 'LOCK = "/tmp/' not in na_src            # ölü sabit geri dönmesin
     assert "_agent_lock_path()" in na_src
 
+
+# ─── (g) Denetim bulguları (v2.6.0 — bağımsız denetim #5/#6) ───
+# #5: fallback'te gelecek tarihli (saat kayması) kayıt bayat sayılıp devralınıyordu
+#     → fail-OPEN. #6: rclone istisnasında geçici dosya temp'te kalıyordu.
+
+def test_fallback_ileri_tarihli_kayit_fail_closed(monkeypatch, tmp_path):
+    """#5: canlı pid + GELECEK tarihli kayıt → RED (bayatlık yalnız üst sınır)."""
+    from datetime import datetime, timedelta
+    p = tmp_path / "cumulus_node_agent.lock"
+    gelecek = (datetime.now() + timedelta(minutes=5)).isoformat(timespec="seconds")
+    p.write_text(f"1 {gelecek}\n", encoding="utf-8")     # pid 1 = canlı (init)
+    monkeypatch.setattr(na, "LOCK", str(p))
+    monkeypatch.setattr(na, "fcntl", None)
+    monkeypatch.setattr(na, "msvcrt", None, raising=False)
+    assert na._lock_acquire() is None                    # fail-closed
+
+
+def test_fallback_bayat_kayit_devralinir(monkeypatch, tmp_path):
+    """#5 sınırı: canlı pid ama kayıt 2 saatten eski → devral (kalıcı blok yok)."""
+    from datetime import datetime, timedelta
+    p = tmp_path / "cumulus_node_agent.lock"
+    eski = (datetime.now() - timedelta(hours=3)).isoformat(timespec="seconds")
+    p.write_text(f"1 {eski}\n", encoding="utf-8")
+    monkeypatch.setattr(na, "LOCK", str(p))
+    monkeypatch.setattr(na, "fcntl", None)
+    monkeypatch.setattr(na, "msvcrt", None, raising=False)
+    fd = na._lock_acquire()
+    assert fd is not None
+    na._lock_release(fd)
+
+
+def test_hub_status_gecici_dosya_istisnada_da_silinir(monkeypatch, tmp_path):
+    """#6: rclone istisnası geçici dosyayı temp'te BIRAKMAZ (kilit de bırakılır)."""
+    monkeypatch.setattr(na, "LOCK", str(tmp_path / "cumulus_node_agent.lock"))
+    monkeypatch.setattr(na, "tempfile_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(na, "machine_id", lambda: "HX-TEST")
+
+    def patlat(*a, **k):
+        raise OSError("rclone yok (simüle)")
+
+    monkeypatch.setattr(na, "run", patlat)
+    with pytest.raises(OSError):
+        na.write_hub_status({"m": 1})
+    assert list(tmp_path.glob("status_*.json")) == []    # geçici dosya silindi
+    fd = na._lock_acquire()                              # kilit serbest
+    assert fd is not None
+    na._lock_release(fd)
+
+

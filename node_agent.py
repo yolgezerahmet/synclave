@@ -241,14 +241,21 @@ def _lock_acquire():
             return None
         _lock_kaydi_yaz(fd)
         return fd
-    # Kilit API'si yok → kayıt tabanlı guard (canlı pid + taze kayıt ⇒ RED)
+    # Kilit API'si yok → kayıt tabanlı guard (canlı pid + taze kayıt ⇒ RED).
+    # Dürüst sınır: bu yol ATOMİK DEĞİL (okuma ile yazma arasında yarış olabilir);
+    # yalnızca fcntl ve msvcrt'in İKİSİ de yoksa devreye girer — Linux/Windows'ta
+    # ikisinden biri her zaman vardır. Yarış olsa bile hub'a yazılan dosya makineye
+    # ÖZELdir (status_<machine>.json) → kayıp güncelleme değil, aynı içeriğin
+    # tekrar yazımı olur.
     try:
         fd.seek(0)
         parcalar = fd.read().split()
         if len(parcalar) >= 2:
             pid, ts = int(parcalar[0]), datetime.fromisoformat(parcalar[1])
             yas = (datetime.now() - ts).total_seconds()
-            if pid != os.getpid() and _pid_canli(pid) and 0 <= yas < _KILIT_BAYAT_S:
+            # yas < 0 (ileri tarihli kayıt / saat kayması) da RED edilir: bayatlık
+            # ÜST sınırı gevşetir, gelecek tarihli kayıt gevşetmez (fail-closed).
+            if pid != os.getpid() and _pid_canli(pid) and yas < _KILIT_BAYAT_S:
                 fd.close()
                 return None
     except (ValueError, OSError):
@@ -278,6 +285,14 @@ def _lock_release(fd) -> None:
 
 
 # ── Rapor yazma ───────────────────────────────────────────────
+def _gecici_sil(p: Path) -> None:
+    """Geçici rapor dosyasını sil — istisna yolları dâhil her yolda."""
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def write_hub_status(status: dict) -> bool:
     """status.json'u GDrive'a yaz — merkezden tüm makineler görünür.
 
@@ -285,27 +300,22 @@ def write_hub_status(status: dict) -> bool:
     aynı makinede ikinci ajan koşuyorsa bu adım ATLANIR (bekleme yok).
     Motor kilidi tutulmaz — ajan sync_motor alt-sürecini bu adımdan sonra
     çağırır ve motor kendi kilidini alabilmelidir (döngüsel kilitlenme yok).
+    Geçici dosya her yolda silinir (istisna dâhil) — denetim bulgusu #6.
     """
     tmp = Path(tempfile_dir()) / f"status_{machine_id()}.json"
     tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2))
     dst = f"{GDRIVE_HUB}/{DEFAULT_USER}/{machine_id()}/status.json"
     kilit = _lock_acquire()
     if kilit is None:                       # başka ajan yazıyor → bu tick atla
+        _gecici_sil(tmp)
         print("  ⏭ hub raporu atlandı: başka ajan kilidi tutuyor")
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
         return False
     try:
         rc, _, err = run(["rclone", "copyto", str(tmp), dst,
                           "--ignore-checksum", "--no-traverse"], timeout=120)
     finally:
         _lock_release(kilit)
-    try:
-        tmp.unlink(missing_ok=True)
-    except Exception:
-        pass
+        _gecici_sil(tmp)
     if rc != 0:
         print(f"  ⚠ hub rapor yazılamadı: {err.strip()[:120]}")
         return False

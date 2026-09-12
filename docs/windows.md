@@ -125,7 +125,7 @@ Hazır uzaktan kurulum betiği: `remote_hermes_setup.ps1` (SSH/Tailscale üzerin
 ## Doğrulama
 
 ```powershell
-python -m pytest tests/ -q     # kaynak kurulumda: tüm testler PASS (mevcut: 286)
+python -m pytest tests/ -q     # kaynak kurulumda: tüm testler PASS (mevcut: 289)
 synclave doctor                # rclone remote + gh + restic kontrolü
 ```
 
