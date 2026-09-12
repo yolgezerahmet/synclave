@@ -1,5 +1,32 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.6.1] — 2026-09-12 (RETRY SINIFLANDIRICISI: iki ölçülmüş kaçak kapatıldı)
+
+- **Denetim (bağımsız, OceanAPI gpt-5.6-sol DONE-CHECK turu):** denetçinin
+  verdiği örnek (`status a b c d copy` → "True") ÖLÇÜMLE YANLIŞ çıktı —
+  'copy' veto penceresinin (toks[1:6]) İÇİNDEDİR ve sınıflandırıcı zaten
+  False döner. Denetim yine de iki GERÇEK kaçağı ortaya çıkardı; ikisi de
+  kapatıldı (çürütülen hipotez de kayda geçti).
+- **Bulgu 1 (ölçüldü):** yazma sözcüğü veto penceresinin DIŞINA çıkabiliyordu:
+  `rclone status a b c d e f copy` → eski `True` (**yazma komutuna retry**),
+  yeni `False`. Pencere artık yalnız OKUMA sözcüğünü bulmak için kullanılır;
+  yazma veto'su parçanın TÜM token'larını tarar.
+- **Bulgu 2 (ölçüldü):** `rclone lsf h | xargs -I{} rclone copyto {} dest`
+  bileşik komutunun ikinci parçası HİÇ incelenmiyordu: eski `True`, yeni
+  `False`. Komut boru/zincir ayıraçlarıyla (`|`, `;`, `&`, `&&`, `||`, yeni
+  satır) parçalanır ve HER parça idempotent okuma olmalıdır (fail-closed).
+  İkinci parçası okuma olmayan boru hatları (`rclone lsf h | tail -1`) da RED
+  edilir — bu, rclone rc'sini yutan pipeline yasağıyla aynı yöndedir.
+- **Canlı hata DEĞİLDİ:** retry veren üç çağrı yeri (GDrive sürüm listesi ×2,
+  A2A `ping`) tek parçalı okumadır; ölçüm `retries=1` + bileşik komut
+  kalıbının kodda hiç geçmediğini gösterdi. Sertleştirme dayanıklılığı değil,
+  politika değişmezini ("yazmaya ASLA retry") sınıflandırıcı sınırında kilitler.
+- **Kapılar:** `tests/test_retry.py` 79 → 85 test: pencere dışı yazma veto'su,
+  bileşik komutta gizli yazma/bilinmeyen parça RED, `run_cmd` boru hattında
+  TEK subprocess çağrısı (retry yok), GERÇEK okuma çağrılarının retry'ı
+  kaybetmemesi, parçalayıcı kenar durumları + kaynak kapısı (`retries=1`
+  çağrı yerleri kabuk ayıracı taşıyamaz — retry sessizce kaybolmasın).
+
 ## [2.6.0] — 2026-09-12 (WINDOWS UYUMU: ajan kilidi UYGULANDI + platform geçici dizinleri)
 
 - **Bulgu 1 (kod okuması — ölü sabit + belgede olup kodda OLMAYAN garanti):**

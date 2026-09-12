@@ -672,3 +672,84 @@ def test_bayrak_onekli_yazma_okuma_sanilmaz(cmd):
 def test_bayrak_onekli_okuma_retry_almaya_devam_eder(cmd):
     """Genişleyen veto, GERÇEK okuma çağrılarını kırmamalı."""
     assert sm._is_idempotent_read(cmd)
+
+
+# ─── v2.6.1 SINIFLANDIRICI SERTLEŞTİRMESİ (bağımsız denetim, 12 Eyl 2026) ──
+# Denetçinin verdiği örnek (`status a b c d copy`) ÖLÇÜMLE YANLIŞ çıktı:
+# 'copy' veto penceresinin (toks[1:6]) İÇİNDE ve zaten False dönüyordu.
+# Ama aynı denetimin altında yatan iki GERÇEK kaçak ölçüldü ve kapatıldı:
+#   • yazma sözcüğü pencere DIŞINDA → `rclone status a b c d e f copy`
+#     (eski sınıflandırıcı: True = yazma komutuna retry açılıyordu)
+#   • boru hattının 2. parçasında gizli yazma → `rclone lsf h | xargs … copyto`
+#     (eski: yalnız ilk parça inceleniyordu → True)
+
+@pytest.mark.parametrize("cmd", [
+    "rclone status a b c d e f copy",
+    "rclone lsf gdrive:hub --files-only --hash --max-depth 1 -v copy",
+])
+def test_pencere_disinda_yazma_sozcugu_veto_eder(cmd):
+    """Yazma sözcüğü 5 argümanlık pencerenin dışına çıksa da VETO eder."""
+    assert not sm._is_idempotent_read(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "rclone lsf gdrive:hub | xargs -I{} rclone copyto {} gdrive:dest",
+    "rclone lsf gdrive:hub && rclone copyto a b",
+    "rclone lsd gdrive:hub; rclone delete gdrive:hub/x",
+    "rclone lsf gdrive:hub | tail -1",
+    "rclone cat gdrive:hub/f.json | bash",
+])
+def test_boru_hattinda_gizli_yazma_veya_bilinmeyen_parca_retry_almaz(cmd):
+    """Bileşik komutta HER parça okuma olmalı — aksi halde fail-closed RED."""
+    assert not sm._is_idempotent_read(cmd)
+
+
+def test_tek_parca_okuma_retry_almaya_devam_eder():
+    """Sertleştirme GERÇEK okuma çağrılarını kırmamalı (canlı retry yerleri)."""
+    for cmd in ("rclone lsd gdrive:hermes-sync/hahmet/H1/versiyonlu",
+                "rclone lsf gdrive:hub --files-only",
+                "rclone -v lsjson gdrive:hub --hash",
+                "python3 /root/.hermes/scripts/a2a_cli.py ping 100.92.2.47 "
+                "--token abc123",
+                "lsf"):
+        assert sm._is_idempotent_read(cmd), cmd
+
+
+def test_komut_parcalari_bos_ve_ayiracli():
+    """Parçalayıcı: boş girdi/yalnız ayıraç → parça yok; | ; && → 3 parça."""
+    assert sm._komut_parcalari("") == []
+    assert sm._komut_parcalari("   ") == []
+    assert sm._komut_parcalari("  | ; && ") == []
+    assert len(sm._komut_parcalari("a | b && c")) == 3
+
+
+def test_run_cmd_boru_hattinda_yazma_retry_etmez(monkeypatch, no_sleep):
+    """Boru hattında gizli yazma → retries=1 verilse bile TEK subprocess çağrısı."""
+    calls = []
+    fake = _make_fake_run([(1, "", "connection reset by peer")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    _out, rc = sm.run_cmd(
+        "rclone lsf gdrive:hub | xargs -I{} rclone copyto {} gdrive:dest",
+        retries=1)
+    assert rc == 1
+    assert len(calls) == 1, "boru hattındaki yazma retry aldı (fail-open)"
+
+
+def test_retry_cagri_yerleri_bilesik_komut_kullanmaz():
+    """Kaynak kapısı: `retries=1` veren çağrı yerleri boru/zincir kullanmamalı.
+
+    Sınıflandırıcı artık bileşik komutları RED ediyor; ama retry'li bir çağrı
+    yeri boru hattına dönerse retry SESSİZCE kaybolurdu (dayanıklılık düşüşü).
+    Bu kapı ikisinin ayrışmasını engeller (yorum satırları ayıklanır).
+    """
+    src = Path(sm.__file__).read_text(encoding="utf-8")
+    kod = "\n".join(l for l in src.splitlines()
+                    if not l.lstrip().startswith("#"))
+    yerler = [m.start() for m in re.finditer(r"retries=1", kod)]
+    assert len(yerler) >= 3, "retry çağrı yeri taraması bayat (>=3 bekleniyor)"
+    for pos in yerler:
+        bag = kod[max(0, pos - 260):pos]
+        if "def run_cmd" in bag or "def run_with_retry" in bag:
+            continue          # tanım satırları (varsayılan değer)
+        assert not re.search(r"[|;&]", bag), \
+            f"retries=1 + kabuk ayıracı (retry kaybı): {bag[-90:]!r}"

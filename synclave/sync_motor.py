@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -679,36 +679,52 @@ _RETRY_NET_MARKERS = (
 _RETRY_TRANSIENT = _RETRY_NET_MARKERS + ("timed out", "temporary", "reset")
 
 
+def _komut_parcalari(cmd_text: str):
+    """Bileşik kabuk komutunu parçalara böl (boru/zincir ayıraçları).
+
+    v2.6.1 sertleştirmesi: `rclone lsf gdrive:hub | xargs -I{} rclone copyto
+    {} dest` gibi bir boru hattında YAZMA gizlenebiliyordu — eski sınıflandırıcı
+    yalnız ilk parçayı görüp okuma sanıyor, retry açıyordu (ölçüldü:
+    `_is_idempotent_read` → True). Bu artık fail-closed: HER parça okuma olmalı.
+    """
+    return [p for p in re.split(r"[|;&\n]+", str(cmd_text)) if p.strip()]
+
+
 def _is_idempotent_read(cmd_text: str) -> bool:
-    """Komut metninde idempotent okuma alt-komutu var mı — FAIL-CLOSED.
+    """Komut (bileşik olabilir) TAMAMEN idempotent okuma mı — FAIL-CLOSED.
 
-    Pencere: program adından sonraki ilk 5 argüman (toks[1:6]). Alt-komut
-    normalde pencerenin başındadır; önüne global bayrak + değeri geçebilir:
-      'rclone --config /root/.conf lsf gdrive:hub'  → OKUMA (retry açılır)
-      'rclone --config lsf copy gdrive:a gdrive:b'  → YAZMA (retry kapalı)
-    Bayrak+değer ikilisi alt-komutun önünde 2 konumdan fazlasını kaplayamaz,
-    bu yüzden 5 argümanlık pencere rclone sözdizimini kapsar.
-
-    Kural (öncelik sırası):
-      1. Pencerede YAZMA sözcüğü varsa → REDDET. Yazma, okuma sözcüğü taşısa
-         bile ('rclone copy status dest') retry açamaz (çift yazma/kısmi
-         durum riski). Yazma veto'su okuma eşleşmesinden ÖNCE gelir.
-      2. Yazma yok + OKUMA sözcüğü var → kabul.
+    Kural (her parça için, öncelik sırası):
+      1. Yazma sözcüğü parçanın HERHANGİ bir konumunda varsa → REDDET
+         (yazma veto'su okumadan ÖNCE; 'rclone copy status dest' dahil).
+      2. Yazma yok + OKUMA sözcüğü alt-komut penceresinde (toks[1:6]) → kabul.
       3. Hiçbiri yok → REDDET (bilinmeyen komut retry almaz).
 
-    Not: veto penceresi eskiden yalnız toks[1] idi; bayrak önekli yazma
-    ('rclone --config lsf copy ...') okuma sanılıp retry açabiliyordu
-    (QCode claude-sonnet-5 denetimi, bulgu #4). Kodda bu kalıp hiç
-    kullanılmıyordu — canlı hata değildi; pencere genişletilerek kapatıldı.
+    Ölçülmüş iki kaçak kapatıldı (bağımsız denetim, 12 Eyl 2026 — denetçinin
+    verdiği `status a b c d copy` örneği YANLIŞTI, gerçekte veto penceresi
+    içindeydi; aşağıdaki ikisi doğrulandı):
+      • `rclone status a b c d e f copy` → eski: True → yeni: False
+        (yazma sözcüğü 5 argümanlık pencerenin DIŞINDA kalıyordu)
+      • `rclone lsf h | xargs rclone copyto a b` → eski: True → yeni: False
+        (boru hattının ikinci parçası hiç incelenmiyordu)
+    Pencere yalnızca ALT-KOMUTUN konumunu bulmak için genişletilmiş bir
+    taramadır; veto artık tüm token'ları görür (dosya adı okuma sözcüğü
+    taşısa bile örn. 'rclone copy status dest' retry açamaz).
     """
-    toks = str(cmd_text).split()
-    if not toks:
-        return False
-    # Tek token ('lsf') → program adı yok, o token'ın kendisi alt-komuttur.
-    pencere = [t.lower() for t in (toks[1:6] if len(toks) > 1 else toks)]
-    if any(t in _RETRY_WRITE_TOKENS for t in pencere):
-        return False
-    return any(t in _RETRY_READ_TOKENS for t in pencere)
+    gordum = False
+    for parca in _komut_parcalari(cmd_text):
+        toks = parca.split()
+        if not toks:
+            continue
+        gordum = True
+        alt = [t.lower() for t in (toks[1:6] if len(toks) > 1 else toks)]
+        # 1) yazma veto'su — parçanın tamamı (pencere DIŞI dahil)
+        if any(t.strip("\"'") in _RETRY_WRITE_TOKENS
+               for t in (x.lower() for x in toks)):
+            return False
+        # 2) okuma alt-komutu pencerede mi
+        if not any(t in _RETRY_READ_TOKENS for t in alt):
+            return False
+    return gordum
 
 
 def _is_transient_rc(rc: int, err: str) -> bool:
