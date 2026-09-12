@@ -644,3 +644,31 @@ def test_run_rclone_status_okumadir_retry_eder(monkeypatch, no_sleep):
     rc, out, err = ck._run_rclone(["status", "gdrive:hub"])
     assert rc == 0
     assert len(calls) == 2  # geçici hata → retry → başarı
+
+
+# ─── Bayrak önekli gizlenme (QCode claude-sonnet-5 denetimi, bulgu #4) ──
+# 'rclone' sözdiziminde alt-komut normalde 2. token'dır. Global bir bayrak
+# öne geçerse (ve bayrağın DEĞERİ okuma sözcüğü ise) eski ilk-3-token
+# taraması yazmayı OKUMA sanıp retry açabiliyordu — çift yazma riski.
+# Ölçüm (12 Eyl 2026): bu kalıp kodda HİÇ kullanılmıyor, yani canlı hata
+# değildi; yine de veto penceresi ilk-3'e genişletilip kapatıldı ve kilitlendi.
+
+@pytest.mark.parametrize("cmd", [
+    "rclone --config lsf copy gdrive:a gdrive:b",
+    "rclone --config lsf copyto a b",
+    "rclone --log-level status sync gdrive:a gdrive:b",
+    "rclone -v --config cat move a b",
+])
+def test_bayrak_onekli_yazma_okuma_sanilmaz(cmd):
+    """Bayrak öne geçse bile yazma alt-komutu retry AÇAMAZ (fail-closed)."""
+    assert not sm._is_idempotent_read(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "rclone --config /root/.config/rclone/rclone.conf lsf gdrive:hub --files-only",
+    "rclone -v lsjson gdrive:hub --hash",
+    "rclone --log-level INFO lsd gdrive:hub",
+])
+def test_bayrak_onekli_okuma_retry_almaya_devam_eder(cmd):
+    """Genişleyen veto, GERÇEK okuma çağrılarını kırmamalı."""
+    assert sm._is_idempotent_read(cmd)

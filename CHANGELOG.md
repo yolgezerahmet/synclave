@@ -1,5 +1,47 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.5.2] — 2026-09-12 (RETRY POLİTİKASI: iki sınıflandırıcı sapması + bayrak önekli gizlenme)
+
+- **Bulgu 1 (ölçüldü — aynı politikanın iki uygulaması ayrışmıştı):**
+  ```
+  sync_motor._RETRY_READ_TOKENS               = {cat,lsf,lsjson,lsd,status,ping,listremotes,direxists,about}
+  sync_common_knowledge._RCLONE_READ_COMMANDS = {cat,lsf,lsjson,lsd}
+  ```
+  Ölçüm: `rclone status` motorda **OKUMA** (retry açık), ck'da yazma sanılıp
+  retry **kapalı**. Log kanıtı (düzeltme öncesi):
+  `sync hata: rclone status gdrive:hub rc=1 0.0s retry=0`.
+  Canlı hata **değildi** (ck yalnızca `cat`/`lsf` çağırır), ama ck yeni bir
+  okuma komutu kullanmaya başlarsa dayanıklılık sessizce zayıflardı;
+  `ping`/`listremotes`/`direxists`/`about` ck'da tamamen eksikti.
+
+- **Bulgu 2 (ölçüldü — bayrak önekli yazma okuma sanılabiliyordu):** yazma
+  veto'su yalnız `toks[1]` idi. Global bayrak + **değeri** alt-komutun önüne
+  geçerse tarama yazmayı OKUMA sanıyordu:
+  `rclone --config lsf copy a b` → eski sonuç `True` (**retry açık = çift
+  yazma riski**). Aynı körlük ters yönde de vardı:
+  `rclone --config <yol> lsf gdrive:hub` → eski sonuç `False` (gerçek okuma
+  retry kaybediyordu). Ölçüm: bu kalıp kodda **hiç kullanılmıyordu**.
+
+- **Düzeltme (tek kanonik okuma kümesi + veto penceresi):** ck okuma kümesi
+  kanonik 9 tokene eşitlendi; veto penceresi program adından sonraki ilk
+  5 argüman (`toks[1:6]`), kural **fail-closed ve öncelikli**: pencerede
+  YAZMA varsa RED → yoksa OKUMA varsa kabul → hiçbiri yoksa RED. Bayrak+değer
+  ikilisi alt-komutun önünde 2 konumdan fazlasını kaplayamaz.
+
+- **Düzeltme (sapma kapısı — +37 test):** `tests/test_retry.py`:
+  okuma kümelerinin **küme eşitliği**, `okuma ∩ yazma = ∅` güvenlik
+  değişmezi, okuma ve yazmada iki sınıflandırıcının **karar eşitliği**,
+  gizlenmiş okuma sözcüğü adversarial vakaları (`rclone copy status dest`,
+  `rclone move cat a b`, …), bayrak önekli yazma/okuma vakaları ve `status`
+  retry davranışı.
+
+- **Yazma komutlarına retry YASAK değişmedi** (çift yazma / kısmi durum
+  fail-closed korunur).
+
+- **Kanıt:** düzeltme öncesi 7 test kırmızı (log `retry=0`) → sonrasında
+  public **278 passed / 0 failed**, ikiz depo **277 passed / 1 skipped**,
+  ikiz-depo parite kapısı yeşil.
+
 ## [2.5.1] — 2026-09-11 (KİLİT BÜTÜNLÜĞÜ: sahip kaydı korunur + fallback fail-closed)
 
 - **Bulgu 1 (ölçüldü — reddedilen aday sahibin kaydını siliyordu):**
