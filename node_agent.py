@@ -25,7 +25,14 @@ ZAMANLAYICI (otonomluk):
 
 GÜVENLİK:
   - .env/*.key/*.pem asla paketlenmez (sync_motor kuralı)
-  - Aynı anda iki ajan aynı hub'a yazamaz (ortak flock /tmp/cumulus_sync.lock)
+  - Aynı MAKİNEDE iki ajan eşzamanlı koşamaz (cumulus_node_agent.lock —
+    fcntl/msvcrt, non-blocking; kilit doluysa hub raporu adımı ATLANIR).
+    Kapsam sınırı: dosya kilidi yalnızca aynı dosya sistemindeki ajanları
+    koordine eder. Farklı makineler makineye ÖZEL status.json yazar (paylaşımlı
+    değiştirilebilir dosya yok); eşitleme sırası sync_motor'un kendi kilidiyle
+    (MOTOR_LOCK) korunur. Ajan kilidi sync_motor'un kilidiyle AYNI dosya
+    DEĞİLDİR (aynı olsaydı: ajan kilit tutarken motor alt-süreci kendi kilidini
+    alamaz → sync sessizce atlanırdı).
   - Çakışma asla üzerine yazmaz — .conflict.<ts> olarak korunur
   - GDrive versiyonlu yedekler ASLA SİLİNMEZ
 
@@ -43,12 +50,34 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:                                    # Linux/macOS
+    import fcntl
+except ImportError:                     # Windows — fcntl yok
+    fcntl = None
+try:                                    # Windows
+    import msvcrt
+except ImportError:                     # Linux/macOS — msvcrt yok
+    msvcrt = None
+
 # ── Yapılandırma ──────────────────────────────────────────────
 MOTOR_DIR = Path(__file__).resolve().parent          # sync_motor dizini
 MOTOR = MOTOR_DIR / "sync_motor.py"
 SMART = MOTOR_DIR / "smart_sync.py"
 CONFIG = MOTOR_DIR / "config.json"
-LOCK = "/tmp/cumulus_sync.lock"                      # sync_motor ile AYNI lock
+# Ajan kilidi (v2.6.0) — sync_motor'un MOTOR_LOCK'undan AYRI DOSYA.
+# Aynı dosya olsaydı döngüsel kilitlenme: ajan kilit tutarken motor alt-süreci
+# kendi kilidini alamaz → sync sessizce atlanır. Dizin kuralı motorla AYNIdır
+# (POSIX: /tmp, Windows: %TEMP%) → Windows'ta '/tmp' varsayımı kalkar.
+def _agent_lock_path() -> str:
+    """Platform farkındalıklı ajan kilit yolu (sync_motor ile aynı dizin kuralı)."""
+    if os.name == "nt":
+        base = (os.environ.get("TEMP") or os.environ.get("TMP")
+                or os.path.expanduser("~"))
+        return os.path.join(base, "cumulus_node_agent.lock")
+    return "/tmp/cumulus_node_agent.lock"
+
+
+LOCK = _agent_lock_path()
 RUN_STATE = Path(os.path.expanduser("~/.hermes/state/sync_last_run.json"))
 
 # H1 merkez görünümü: gdrive:hermes-sync/<user>/<machine>/status.json
@@ -153,14 +182,126 @@ def hub_check() -> str:
     rc2, _, err2 = run(["rclone", "mkdir", f"{GDRIVE_HUB}/{DEFAULT_USER}/{machine_id()}"], timeout=60)
     return "ok" if rc2 == 0 else f"YOK: {err.strip()[:80]} {err2.strip()[:80]}"
 
+# ── Tek-instance kilidi (v2.6.0) ──────────────────────────────
+# Non-blocking: kilit doluysa çağıran ATLAR (bekleme yok — Task Scheduler/cron
+# sonraki tick'te tekrar dener; sınırsız bekleme ajanı ve zamanlayıcıyı kilitler).
+_KILIT_BAYAT_S = 7200          # kilit API'si yokken: bu yaştan eski kayıt bayat
+KILITSIZ = object()            # kilit altyapısı yok → çalışmayı ENGELLEME (sentinel)
+
+def _pid_canli(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)                     # Windows: OpenProcess tabanlı
+        return True
+    except OSError:
+        return False
+
+
+def _lock_kaydi_yaz(fd) -> None:
+    """Kilit kaydı (PID + ISO zaman) — teşhis; yazılamazsa kilit DÜŞMEZ."""
+    try:
+        fd.seek(0)
+        fd.truncate()
+        fd.write(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}\n")
+        fd.flush()
+    except OSError:
+        pass
+
+
+def _lock_acquire():
+    """Ajan kilidini non-blocking al.
+
+    Dönüş: fd (kilit alındı) | None (kilit DOLU — çağıran adımı atlar) |
+    KILITSIZ (kilit alt yapısı yok — kilit olmadan devam).
+
+    fcntl.flock (Linux/macOS) → msvcrt.locking (Windows). Süreç ölürse OS
+    kilidi otomatik düşer; bu yüzden bayat dosya kalıcı blok yaratmaz.
+    Kilit API'si hiç yoksa: pid kaydı + canlılık + 2h yaş sınırı (fail-closed).
+    """
+    try:
+        fd = open(LOCK, "a+", encoding="utf-8")
+    except OSError as e:                    # kilit alt yapısı yok → ENGELLEME
+        print(f"  ⚠ ajan kilidi açılamadı ({e}) — kilit olmadan devam")
+        return KILITSIZ
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fd.close()
+            return None
+        _lock_kaydi_yaz(fd)
+        return fd
+    if msvcrt is not None:
+        try:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            fd.close()
+            return None
+        _lock_kaydi_yaz(fd)
+        return fd
+    # Kilit API'si yok → kayıt tabanlı guard (canlı pid + taze kayıt ⇒ RED)
+    try:
+        fd.seek(0)
+        parcalar = fd.read().split()
+        if len(parcalar) >= 2:
+            pid, ts = int(parcalar[0]), datetime.fromisoformat(parcalar[1])
+            yas = (datetime.now() - ts).total_seconds()
+            if pid != os.getpid() and _pid_canli(pid) and 0 <= yas < _KILIT_BAYAT_S:
+                fd.close()
+                return None
+    except (ValueError, OSError):
+        pass                                # bozuk/eksik kayıt → devral
+    _lock_kaydi_yaz(fd)
+    return fd
+
+
+def _lock_release(fd) -> None:
+    """Kilidi bırak (her yolda çağrılır — finally). KILITSIZ/None → no-op."""
+    if fd is None or fd is KILITSIZ:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            try:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        try:
+            fd.close()
+        except OSError:
+            pass
+
+
 # ── Rapor yazma ───────────────────────────────────────────────
 def write_hub_status(status: dict) -> bool:
-    """status.json'u GDrive'a yaz — merkezden tüm makineler görünür."""
+    """status.json'u GDrive'a yaz — merkezden tüm makineler görünür.
+
+    Yazma YALNIZCA rclone copyto etrafında ajan kilidiyle korunur (v2.6.0):
+    aynı makinede ikinci ajan koşuyorsa bu adım ATLANIR (bekleme yok).
+    Motor kilidi tutulmaz — ajan sync_motor alt-sürecini bu adımdan sonra
+    çağırır ve motor kendi kilidini alabilmelidir (döngüsel kilitlenme yok).
+    """
     tmp = Path(tempfile_dir()) / f"status_{machine_id()}.json"
     tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2))
     dst = f"{GDRIVE_HUB}/{DEFAULT_USER}/{machine_id()}/status.json"
-    rc, _, err = run(["rclone", "copyto", str(tmp), dst,
-                      "--ignore-checksum", "--no-traverse"], timeout=120)
+    kilit = _lock_acquire()
+    if kilit is None:                       # başka ajan yazıyor → bu tick atla
+        print("  ⏭ hub raporu atlandı: başka ajan kilidi tutuyor")
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    try:
+        rc, _, err = run(["rclone", "copyto", str(tmp), dst,
+                          "--ignore-checksum", "--no-traverse"], timeout=120)
+    finally:
+        _lock_release(kilit)
     try:
         tmp.unlink(missing_ok=True)
     except Exception:

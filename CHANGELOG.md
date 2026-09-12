@@ -1,5 +1,42 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.6.0] — 2026-09-12 (WINDOWS UYUMU: ajan kilidi UYGULANDI + platform geçici dizinleri)
+
+- **Bulgu 1 (kod okuması — ölü sabit + belgede olup kodda OLMAYAN garanti):**
+  `node_agent.py` içinde `LOCK = "/tmp/cumulus_sync.lock"` sabiti TANIMLI ama
+  hiçbir yerde KULLANILMIYORDU (yalnız tanım + docstring). Docstring satır 28
+  "Aynı anda iki ajan aynı hub'a yazamaz (ortak flock /tmp/cumulus_sync.lock)"
+  diyordu; gerçekte `write_hub_status()` içindeki `rclone copyto` (hub'a yazma)
+  HİÇBİR kilit altında değildi. Ajanın koştuğu makine Windows (H2, Task
+  Scheduler) ve orada `/tmp` YOKTUR.
+- **Bulgu 2 (kod okuması — platform sabiti):** `sync_motor` geçici yolları
+  sabitti: `announce()` → `/tmp/hermes_uploads` | `/tmp`, `gdrive_pull_latest()`
+  → `/tmp/sync_pull_<node>/` (3 çağrı). Windows'ta bu yol geçerli sürücünün
+  köküne (`C:\\tmp\\...`) çözülür — `/tmp/...` gerçek bir dizin değildir.
+- **Düzeltme — ajan kilidi (yeni yetenek):** `_agent_lock_path()` (POSIX `/tmp`,
+  Windows `%TEMP%` — motor kilit kuralıyla aynı dizin, AYRI dosya adı
+  `cumulus_node_agent.lock`) + `_lock_acquire()` / `_lock_release()`:
+  `fcntl.flock` → `msvcrt.locking` (non-blocking). Kilit YALNIZCA `rclone
+  copyto` etrafında alınır; kilit doluysa bu adım ATLANIR (bekleme yok —
+  sınırsız bekleme ajanı ve zamanlayıcıyı kilitlerdi). Ajan kilidi motor
+  kilidinden ayrı olmak ZORUNDA: aynı dosya olsaydı ajan kilit tutarken
+  `sync_motor` alt-süreci kendi kilidini alamaz, sync sessizce atlanırdı
+  (döngüsel kilitlenme). Kilit API'si hiç yoksa pid kaydı + canlılık + 2 saat
+  yaş sınırı (fail-closed); kilit dosyası açılamazsa `KILITSIZ` sentinel ile
+  ESKİ davranış korunur (çalışma engellenmez).
+- **Düzeltme — platform geçici dizini:** `sync_motor._platform_temp_dir()`
+  (Windows: `%TEMP%`/`%TMP%`, POSIX: `/tmp` birebir korunur) `announce()` ve
+  `gdrive_pull_latest()` çağrılarına bağlandı.
+- **Kapsam sınırı (dürüst):** dosya kilidi yalnızca AYNI dosya sistemindeki
+  ajanları koordine eder. Farklı makineler makineye ÖZEL `status.json` yazar
+  (paylaşımlı değiştirilebilir dosya yok); eşitleme sırası `sync_motor`'un
+  kendi kilidiyle korunur.
+- **Kapılar:** `tests/test_windows_uyum.py` 14 → 22 test: Windows/POSIX kilit
+  yolu, ajan∩motor kilit dosyası AYRI olmalı, ikinci ajan RED (non-blocking),
+  kilit altyapısı yoksa engellemez, kilit dolu iken GDrive yazımı yok, rclone
+  istisnasında kilit `finally` ile bırakılır, sabit `/tmp` kalıntısı kaynak
+  kapısı (`/tmp/sync_pull_`, `/tmp/hermes_uploads`, `LOCK = "/tmp/` yasak).
+
 ## [2.5.2] — 2026-09-12 (RETRY POLİTİKASI: iki sınıflandırıcı sapması + bayrak önekli gizlenme)
 
 - **Bulgu 1 (ölçüldü — aynı politikanın iki uygulaması ayrışmıştı):**

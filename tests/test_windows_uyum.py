@@ -234,3 +234,107 @@ def test_a2a_server_uvicorn_missing(monkeypatch, capsys):
     assert "HATA" in out
     assert "uvicorn" in out
     assert "Traceback" not in out
+
+
+# ─── (f) Ajan kilidi (v2.6.0) ──────────────────────────────────
+# Ölçülen kusurlar: (1) node_agent.LOCK = "/tmp/..." SABİT ve ÖLÜ idi (hiç
+# kullanılmıyordu) → Windows'ta '/tmp' yok, docstring'deki "iki ajan aynı hub'a
+# yazamaz" garantisi UYGULANMIYORDU; (2) sync_motor geçici yolları ('/tmp/sync_pull',
+# '/tmp/hermes_uploads') platformdan bağımsız sabitti → Windows agent (H2) sürücü
+# köküne yazmaya çalışırdı.
+import synclave.node_agent as na
+
+
+def test_agent_lock_path_windows(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setenv("TEMP", "C:\\Users\\h2\\AppData\\Local\\Temp")
+    p = na._agent_lock_path()
+    assert p == os.path.join("C:\\Users\\h2\\AppData\\Local\\Temp",
+                             "cumulus_node_agent.lock")
+    assert not p.startswith("/tmp")
+
+
+def test_agent_lock_path_posix(monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+    assert na._agent_lock_path() == "/tmp/cumulus_node_agent.lock"
+
+
+def test_agent_lock_motor_kilidiyle_ayni_dosya_degil(monkeypatch):
+    """Döngüsel kilitlenme kapısı: ajan kilidi ≠ motor kilidi (aynı dizin, farklı ad)."""
+    for ad in ("posix", "nt"):
+        monkeypatch.setattr(os, "name", ad)
+        assert na._agent_lock_path() != sm._motor_lock_path()
+        assert os.path.dirname(na._agent_lock_path()) == \
+               os.path.dirname(sm._motor_lock_path())
+
+
+def test_ikinci_ajan_kilidi_alamaz(monkeypatch, tmp_path):
+    """Aynı makinede eşzamanlı ikinci ajan → non-blocking RED (fail-closed)."""
+    monkeypatch.setattr(na, "LOCK", str(tmp_path / "cumulus_node_agent.lock"))
+    fd1 = na._lock_acquire()
+    assert fd1 is not None and fd1 is not na.KILITSIZ
+    try:
+        assert na._lock_acquire() is None          # ikinci aday ATLAR
+    finally:
+        na._lock_release(fd1)
+    fd2 = na._lock_acquire()                       # sahip bıraktı → alınır
+    assert fd2 is not None
+    na._lock_release(fd2)
+
+
+def test_kilit_alt_yapisi_yoksa_engellemez(monkeypatch, tmp_path):
+    """fcntl+msvcrt yok → KILITSIZ sentinel (çalışma ENGELLENMEZ)."""
+    monkeypatch.setattr(na, "LOCK", str(tmp_path / "yeni_dizin_yok" / "x.lock"))
+    fd = na._lock_acquire()
+    assert fd is na.KILITSIZ
+    na._lock_release(fd)                            # no-op, çökmez
+
+
+def test_hub_status_kilit_doluysa_yazmaz(monkeypatch, tmp_path, capsys):
+    """Kilit başka ajandaysa GDrive yazımı ATLANIR (rclone hiç çağrılmaz)."""
+    cagrilar = []
+    monkeypatch.setattr(na, "LOCK", str(tmp_path / "cumulus_node_agent.lock"))
+    monkeypatch.setattr(na, "tempfile_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(na, "machine_id", lambda: "HX-TEST")
+    monkeypatch.setattr(na, "run",
+                        lambda *a, **k: (cagrilar.append(a), (0, "", ""))[1])
+    sahip = na._lock_acquire()
+    try:
+        assert na.write_hub_status({"m": 1}) is False
+    finally:
+        na._lock_release(sahip)
+    assert cagrilar == []                           # rclone copyto YOK
+    assert "atlandı" in capsys.readouterr().out
+
+
+def test_hub_status_kilit_hata_durumunda_birakilir(monkeypatch, tmp_path):
+    """rclone istisna atsa bile kilit finally'de bırakılır (sonraki tick kilitlenmez)."""
+    monkeypatch.setattr(na, "LOCK", str(tmp_path / "cumulus_node_agent.lock"))
+    monkeypatch.setattr(na, "tempfile_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(na, "machine_id", lambda: "HX-TEST")
+
+    def patlat(*a, **k):
+        raise OSError("rclone yok (simüle)")
+
+    monkeypatch.setattr(na, "run", patlat)
+    with pytest.raises(OSError):
+        na.write_hub_status({"m": 1})
+    fd = na._lock_acquire()                         # kilit serbest kaldı
+    assert fd is not None
+    na._lock_release(fd)
+
+
+def test_gecici_yollar_platformdan_turetilir():
+    """Kaynak kapısı: geçici yol sabitleri platformdan türetilmeli.
+
+    '/tmp/sync_pull_*' ve '/tmp/hermes_uploads' kalıntısı Windows agent'ta
+    sürücü köküne yazmaya çalışırdı.
+    """
+    sm_src = Path(sm.__file__).read_text(encoding="utf-8")
+    na_src = Path(na.__file__).read_text(encoding="utf-8")
+    assert "_platform_temp_dir()" in sm_src
+    assert '"/tmp/sync_pull_' not in sm_src
+    assert '"/tmp/hermes_uploads"' not in sm_src
+    assert 'LOCK = "/tmp/' not in na_src            # ölü sabit geri dönmesin
+    assert "_agent_lock_path()" in na_src
+

@@ -173,9 +173,14 @@ python -m synclave.sync_motor mesh status
 ```
 
 Windows notları:
-- Kilit dosyası `%TEMP%\cumulus_sync.lock` kullanılır (`/tmp` yok) — msvcrt.locking.
+- Kilit dosyaları `%TEMP%\cumulus_sync.lock` (motor) ve
+  `%TEMP%\cumulus_node_agent.lock` (ajan) — `/tmp` kullanılmaz (`msvcrt.locking`;
+  POSIX'te `fcntl.flock`). Ajan kilidi doluysa hub raporu adımı ATLANIR, koşu
+  düşmez; motor kilidi ayrı dosyadır (döngüsel kilitlenme olmaz).
+- Kapsam: dosya kilidi yalnızca aynı makinedeki ajanları koordine eder; farklı
+  makineler makineye özel `status.json` yazar.
 - `sync_motor.py` / `sync_common_knowledge.py` path'leri `os.path.join` ile kurar;
-  sabit `/` ayracı yoktur.
+  geçici dizinler `_platform_temp_dir()` ile platformdan türetilir (sabit `/` yok).
 - A2A istemcisi (`a2a_cli.py`) yalnızca `urllib` kullanır — ek bağımlılık gerekmez.
 - A2A server `uvicorn` bulunamazsa net hata mesajı basar ve çıkar (traceback değil).
 - Uzaktan kurulum için hazır betikler: `remote_hermes_setup.ps1` (SSH/Tailscale).

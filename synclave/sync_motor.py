@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.5.2"
+__version__ = "2.6.0"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -1314,7 +1314,8 @@ def announce(cfg, msg):
     """Karşı tarafa durum notu bırak (her iki 9090'a)."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"SYNC_NOTE_{ts}.txt"
-    local = "/tmp/hermes_uploads" if cfg["is_h1"] else "/tmp"
+    local = (os.path.join(_platform_temp_dir(), "hermes_uploads")
+             if cfg["is_h1"] else _platform_temp_dir())
     os.makedirs(local, exist_ok=True)
     try:
         with open(os.path.join(local, fname), "w", encoding="utf-8", errors="replace") as f:
@@ -1700,7 +1701,7 @@ def gdrive_pull_latest(cfg, node):
     # Paketi çek (rclone copy dizin bazlı — .tar.gz değil, dizin kopyası)
     out, rc = run_cmd(
         f'rclone copy {cfg["gdrive"]["versioned_dir"]}/{node}/{latest}/ '
-        f'/tmp/sync_pull_{node}/ --ignore-checksum --no-traverse '
+        f'{_platform_temp_dir()}/sync_pull_{node}/ --ignore-checksum --no-traverse '
         f'--drive-acknowledge-abuse',
         timeout=180, shell=True)
     if rc != 0:
@@ -1719,11 +1720,11 @@ def gdrive_pull_latest(cfg, node):
         log.warning(f"{node}: hedef dizin yok")
         return False
 
-    pkg_file = f"/tmp/sync_pull_{node}/{node}.tar.gz"
+    pkg_file = f"{_platform_temp_dir()}/sync_pull_{node}/{node}.tar.gz"
     if not os.path.exists(pkg_file):
         # Rclone dosya adını korudu
         import glob
-        found = glob.glob(f"/tmp/sync_pull_{node}/*.tar.gz")
+        found = glob.glob(f"{_platform_temp_dir()}/sync_pull_{node}/*.tar.gz")
         pkg_file = found[0] if found else None
     if not pkg_file:
         log.warning(f"{node}: paket bulunamadı")
@@ -2276,6 +2277,18 @@ def _hub_base(args_hub=None):
 
 
 # ── v1.6.4: TEK-INSTANCE KİLİT + SON-KOŞU RAPORU ──
+
+def _platform_temp_dir() -> str:
+    """Geçici dizin — platform farkındalıklı (v2.6.0).
+
+    Windows'ta '/tmp' YOKTUR ('/tmp' → geçerli sürücünün kökü, genelde yazılamaz).
+    POSIX'te eski davranış birebir korunur ('/tmp').
+    """
+    if os.name == "nt":
+        return (os.environ.get("TEMP") or os.environ.get("TMP")
+                or os.path.expanduser("~"))
+    return "/tmp"
+
 
 def _motor_lock_path() -> str:
     """Kilit dosyası yolu — platform farkındalıklı (v2.1.1).

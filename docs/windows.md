@@ -108,8 +108,15 @@ Hazır uzaktan kurulum betiği: `remote_hermes_setup.ps1` (SSH/Tailscale üzerin
 
 ## Windows notları (kod ile doğrulanmış)
 
-- Kilit dosyası `%TEMP%\cumulus_sync.lock` — `msvcrt.locking` (POSIX `/tmp` yok).
-- Yollar `os.path.join` ile kurulur; sabit `/` ayracı yoktur.
+- İki kilit dosyası vardır (v2.6.0): `%TEMP%\cumulus_sync.lock` (motor,
+  `msvcrt.locking`) ve `%TEMP%\cumulus_node_agent.lock` (otonom ajan). POSIX'te
+  aynı adlar `/tmp` altındadır (`fcntl.flock`). Ajan kilidi doluysa hub raporu
+  adımı ATLANIR (koşu düşmez, bekleme yok); motor kilidi ayrı dosyadır —
+  ajan kilit tutarken `sync_motor` alt-süreci kendi kilidini alabilir.
+- Kilit kapsamı yalnızca aynı makinedir; farklı makineler makineye özel
+  `status.json` yazar (paylaşımlı değiştirilebilir dosya yok).
+- Yollar `os.path.join` ile kurulur; geçici dizinler `_platform_temp_dir()`
+  ile platformdan türetilir (sabit `/` ayracı ve `/tmp` varsayımı yoktur).
 - `a2a_cli.py` yalnızca `urllib` kullanır → ek bağımlılık gerekmez.
 - A2A sunucusu `uvicorn` bulamazsa net hata mesajı basar ve çıkar.
 - `tests/manual/` elle koşulan betiklerdir; `pytest tests/` bunları toplamaz
@@ -118,7 +125,7 @@ Hazır uzaktan kurulum betiği: `remote_hermes_setup.ps1` (SSH/Tailscale üzerin
 ## Doğrulama
 
 ```powershell
-python -m pytest tests/ -q     # kaynak kurulumda: tüm testler PASS (mevcut: 153)
+python -m pytest tests/ -q     # kaynak kurulumda: tüm testler PASS (mevcut: 286)
 synclave doctor                # rclone remote + gh + restic kontrolü
 ```
 
