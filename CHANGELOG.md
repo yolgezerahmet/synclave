@@ -21,7 +21,7 @@
   A2A `ping`) tek parçalı okumadır; ölçüm `retries=1` + bileşik komut
   kalıbının kodda hiç geçmediğini gösterdi. Sertleştirme dayanıklılığı değil,
   politika değişmezini ("yazmaya ASLA retry") sınıflandırıcı sınırında kilitler.
-- **Kapılar:** `tests/test_retry.py` 79 → 85 test: pencere dışı yazma veto'su,
+- **Kapılar:** `tests/test_retry.py` 75 → 86 test: pencere dışı yazma veto'su,
   bileşik komutta gizli yazma/bilinmeyen parça RED, `run_cmd` boru hattında
   TEK subprocess çağrısı (retry yok), GERÇEK okuma çağrılarının retry'ı
   kaybetmemesi, parçalayıcı kenar durumları + kaynak kapısı (`retries=1`
