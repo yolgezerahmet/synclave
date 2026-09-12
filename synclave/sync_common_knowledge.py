@@ -114,7 +114,15 @@ def _hub_base(user: Optional[str] = None) -> str:
 # Geçici ağ/5xx hatalarında YALNIZCA idempotent OKUMA komutlarına
 # 1 retry (3s bekle) uygulanır; yazma komutlarına (copy/copyto)
 # ASLA retry YOK — çift yazma/kısmi durum riski fail-closed korunur.
-_RCLONE_READ_COMMANDS = {"cat", "lsf", "lsjson", "lsd"}
+# KANONİK okuma kümesi — sync_motor._RETRY_READ_TOKENS ile BİREBİR aynı
+# olmak zorundadır: aynı güvenlik politikasının iki uygulaması vardır ve
+# ayrışırlarsa dayanıklılık sessizce zayıflar. Sapma
+# tests/test_retry.py::test_okuma_kumeleri_kume_olarak_esit ile kapılır.
+# Hepsi yan etkisiz SORGUDUR (dosya okuma, dizin listeleme, iş durumu,
+# bağlantı/kuota kontrolü) — retry güvenlidir. Yazma komutları bu kümeye
+# ASLA girmez (çift yazma/kısmi durum riski fail-closed korunur).
+_RCLONE_READ_COMMANDS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
+                         "listremotes", "direxists", "about"}
 _HTTP_5XX_RE = re.compile(r"\b5\d\d\b")
 _NET_MARKERS = (
     "connection reset",

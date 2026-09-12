@@ -562,3 +562,85 @@ def test_rclone_read_permission_denied_no_retry(monkeypatch, no_sleep):
     rc, out, err = sm.rclone_read(["lsjson", "gdrive:hub/x", "--hash"])
     assert rc == 1 and len(calls) == 1
     assert "permission denied" in err
+
+
+# ─── Politika sapma kapısı (drift gate) ─────────────────────────────
+# Retry politikası iki YERDE ayrı ayrı uygulanır:
+#   sync_motor._RETRY_READ_TOKENS          (run_cmd / rclone_read)
+#   sync_common_knowledge._RCLONE_READ_COMMANDS   (_run_rclone)
+# Biri güncellenip diğeri unutulursa dayanıklılık sessizce zayıflar.
+# Bu kapı, iki uygulamanın AYNI kümeyi ve AYNI kararı vermesini zorlar.
+# Ölçülen gerçek sapma (12 Eyl 2026): 'status' motorda okuma, ck'da yazma
+# sayılıyordu — ck yalnızca cat/lsf çağırdığı için canlı hata değildi,
+# ama 'about'/'direxists'/'ping' eklendiğinde retry kaybı doğururdu.
+
+_OKUMA_ALT_KOMUTLAR = ["cat", "lsf", "lsjson", "lsd", "status", "ping",
+                       "listremotes", "direxists", "about"]
+_YAZMA_ALT_KOMUTLAR = ["copy", "copyto", "move", "sync", "mkdir", "delete",
+                       "purge", "backup", "push", "restore", "upload", "rm"]
+
+
+def test_okuma_kumeleri_kume_olarak_esit():
+    """İki sınıflandırıcının okuma kümeleri EŞİT olmalı (tek politika)."""
+    motor = set(sm._RETRY_READ_TOKENS)
+    ck_set = set(ck._RCLONE_READ_COMMANDS)
+    assert motor == ck_set, (
+        "retry okuma kümeleri saptı — yalnız sync_motor'da: %s | yalnız "
+        "sync_common_knowledge'da: %s" % (sorted(motor - ck_set),
+                                          sorted(ck_set - motor)))
+
+
+def test_okuma_ve_yazma_kumeleri_cakismaz():
+    """Güvenlik değişmezi: bir sözcük hem okuma hem yazma olamaz."""
+    yazma = set(sm._RETRY_WRITE_TOKENS)
+    for ad, okuma in (("sync_motor", set(sm._RETRY_READ_TOKENS)),
+                      ("sync_common_knowledge", set(ck._RCLONE_READ_COMMANDS))):
+        kesisim = okuma & yazma
+        assert not kesisim, f"{ad}: okuma∩yazma boş olmalı — {sorted(kesisim)}"
+
+
+@pytest.mark.parametrize("alt", _OKUMA_ALT_KOMUTLAR)
+def test_iki_siniflandirici_okumada_ayni_karari_verir(alt):
+    """Her okuma alt-komutu iki tarafta da 'retry edilebilir' olmalı."""
+    assert sm._is_idempotent_read(f"rclone {alt} gdrive:hub")
+    assert ck._is_rclone_read([alt, "gdrive:hub"])
+
+
+@pytest.mark.parametrize("alt", _YAZMA_ALT_KOMUTLAR)
+def test_iki_siniflandirici_yazmada_ayni_karari_verir(alt):
+    """Her yazma alt-komutu iki tarafta da RED edilmeli (fail-closed)."""
+    assert not sm._is_idempotent_read(f"rclone {alt} a gdrive:hub")
+    assert not ck._is_rclone_read([alt, "a", "gdrive:hub"])
+
+
+@pytest.mark.parametrize("cmd", [
+    "rclone copy status gdrive:x gdrive:y",
+    "rclone move cat gdrive:x gdrive:y",
+    "rclone sync lsf gdrive:x gdrive:y",
+    "rclone copyto lsjson gdrive:x gdrive:y",
+    "rclone backup about gdrive:x",
+    "rclone push ping gdrive:x",
+])
+def test_yazmada_gizlenmis_okuma_sozcugu_retry_etmez(cmd):
+    """Yazma alt-komutu okuma sözcüğü taşısa bile İKİ taraf da RED etmeli.
+
+    'rclone copy status dest' — dosya adı okuma sözcüğüne benziyor;
+    yazma olduğu için çift yazma riskine karşı retry kesinlikle kapalı.
+    """
+    assert not sm._is_idempotent_read(cmd)
+    assert not ck._is_rclone_read(cmd.split()[1:])
+
+
+def test_run_rclone_status_okumadir_retry_eder(monkeypatch, no_sleep):
+    """'status' bir OKUMADIR (spec: cat/lsf/status) → geçici hatada 1 retry.
+
+    Düzeltme öncesi ck 'status'u yazma sayıp retry ETMİYORDU (sapma);
+    geçici ağ hatasında dayanıklılık motordan zayıftı.
+    """
+    calls = []
+    fake = _make_fake_run([(1, "", "connection reset by peer"),
+                           (0, "job: none\n", "")], calls)
+    _patch_subprocess(monkeypatch, ck, fake)
+    rc, out, err = ck._run_rclone(["status", "gdrive:hub"])
+    assert rc == 0
+    assert len(calls) == 2  # geçici hata → retry → başarı
