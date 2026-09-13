@@ -24,11 +24,14 @@
   yedek koşusu kilidi tutarken `forget` iki kez başarısız oldu (13-14 Eyl
   kanıtı); 30m pencere kilidi devralır.
 - **test:** `tests/test_hafiza_merge.py` (kısa kayıt + önek çakışması +
-  idempotent + fail-closed + kaynak kapıları) ve `tests/test_ilerleme.py`
-  (yüzde/ETA matematiği + atomiklik + yan-kanal güvenliği). Ölçülen toplam:
-  **354 passed, 1 skipped** (önceki 316 passed + 1 failed → +38 yeni test;
-  skip = parite kapısı ikiz depo farklı sürümdeyken atlar, senkron sonrası
-  KOŞAR ve yeşildir).
+  idempotent + alt-küme + fail-closed + kaynak kapıları), `tests/test_ilerleme.py`
+  (yüzde/ETA matematiği + atomiklik + yan-kanal güvenliği) ve
+  `tests/test_pull_birlesme_e2e.py` (GERÇEK `gdrive_pull_latest` akışı: rclone
+  mock'lu, tar.gz gerçek — birleşme + kopya üretilmeme kanıtı; ayrıca hafıza
+  dışı dosyada eski çakışma davranışının korunduğu). Mutasyon kanıtı: birleştirme
+  devre dışı bırakıldığında e2e testi ÇÖKER (kayıt kaybı + kopya üretimi
+  gözlemlendi) — test kanıt, iddia değil. Ölçülen toplam: **359 passed, 0 skipped**
+  (önceki durum: 316 passed + 1 failed; +42 yeni test).
 - **Port kaynağı:** özellikler ilk olarak private `cumulus-sync-motor`
   kök kopyasında doğmuştu; bu sürümle kanonik hale getirilip DÖRT kopyada
   (public kök + public paket + private kök + private paket) byte-eşitlendi —
