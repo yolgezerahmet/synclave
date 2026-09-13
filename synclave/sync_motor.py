@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.6.1"
+__version__ = "2.6.2"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -658,9 +658,28 @@ _RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
                       "listremotes", "direxists", "about"}
 # Yazma alt-komutları — dosya adı okuma kelimesine benzese bile (örn.
 # 'rclone copy status <dest>') asla retry açılmaz (çift yazma fail-closed).
+# v2.6.2 (13 Eyl 2026 — ÖLÇÜLMÜŞ kaçak): küme eksikti; adı listede olmayan
+# mutasyon alt-komutları, KONUMSAL argümanı okuma sözcüğü olduğunda retry
+# açıyordu (fail-open, yazmaya retry yasağının ihlali):
+#   'rclone moveto cat gdrive:dest'    → eski True  (MOVE retry)
+#   'rclone touch status gdrive:p'     → eski True  (WRITE retry)
+#   'rclone deletefile cat remote:x'   → eski True  (DELETE retry)
+# Ölçüm: `rclone help` (v1.60.1) komut listesi + _is_idempotent_read çıktısı.
+# Küme artık uzak/yerel DURUM DEĞİŞTİREN tüm alt-komutları kapsar; salt-okuma
+# komutları (lsf/ls/lsl/lsjson/lsd/cat/check/checksum/hashsum/md5sum/sha1sum/
+# size/tree/version/ncdu/obscure/link/cryptcheck/cryptdecode/test/help/…) bu
+# kümeye ASLA girmez. Kimi eklemeler fail-closed yönünde KAYIP yaratabilir
+# (retry artık açılmaz) — bu bilinçlidir: politika "yazmaya ASLA retry".
+# Kapı: tests/test_retry.py::test_yazma_kumesi_gercek_rclone_mutasyonlarini_kapsar
+#       tests/test_retry.py::test_konumsal_okuma_sozcugu_yazmayi_retry_ettirmez
 _RETRY_WRITE_TOKENS = {
     "copy", "copyto", "move", "mv", "backup", "push", "sync",
     "delete", "purge", "rm", "upload", "put", "send", "restore",
+    # mutasyon alt-komutları (v1.60.1 listesinden doğrulandı)
+    "moveto", "deletefile", "mkdir", "rmdir", "rmdirs", "touch",
+    "cleanup", "dedupe", "settier", "copyurl", "rcat", "bisync",
+    "serve", "mount", "config", "authorize", "reconnect", "backend",
+    "rc", "rcd", "completion", "genautocomplete", "gendocs", "selfupdate",
 }
 # rc==-1 (exception) durumunda KALICI hatalar geçici sayılmaz.
 _RETRY_FATAL = ("no such file", "not found", "command not found",

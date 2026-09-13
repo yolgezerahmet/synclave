@@ -1,5 +1,41 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.6.2] — 2026-09-13 (RETRY VETO KÜMESİ: ölçülmüş fail-open kapatıldı)
+
+- **Ölçülmüş kaçak (bu depo, fix öncesi):** `_RETRY_WRITE_TOKENS` eksikti;
+  adı kümede OLMAYAN mutasyon alt-komutları, KONUMSAL argümanı bir okuma
+  sözcüğü olduğunda sınıflandırıcı tarafından okuma sanılıyordu →
+  "yazmaya ASLA retry" değişmezi ihlal ediliyordu (fail-open):
+    - `rclone moveto cat gdrive:dest`   → eski `True` (MOVE'a retry)
+    - `rclone touch status gdrive:p`    → eski `True` (WRITE'a retry)
+    - `rclone deletefile cat remote:x`  → eski `True` (DELETE'e retry)
+- **Kök neden:** sınıflandırıcı okuma sözcüğünü `toks[1:6]` penceresinde
+  arar (bayrak önekli okumalar — `rclone --config <yol> lsf …` — kırılmasın
+  diye). Penceredeki KONUMSAL bir `cat`/`status` argümanı, alt-komut adı
+  veto kümesinde yoksa okuma gibi görünüyordu.
+- **Fix:** veto kümesi, `rclone help` (v1.60.1, makinede ölçüldü) listesindeki
+  DURUM DEĞİŞTİREN tüm alt-komutları kapsayacak şekilde genişletildi:
+  `moveto, deletefile, mkdir, rmdir, rmdirs, touch, cleanup, dedupe, settier,
+  copyurl, rcat, bisync, serve, mount, config, authorize, reconnect,
+  backend, rc, rcd, completion, genautocomplete, gendocs, selfupdate`.
+  Salt-okuma komutları (`lsf/ls/lsl/lsjson/lsd/cat/check/checksum/hashsum/
+  md5sum/sha1sum/size/tree/version/ncdu/obscure/link/cryptcheck/cryptdecode/
+  test/help`) kümeye alınmadı. Büyüme yönü bilinçli olarak fail-closed:
+  gerektiğinde retry KAYBEDİLİR, yazmaya retry AÇILMAZ.
+- **Doğrulama (fix sonrası ölçüm):** konumsal tuzakların tamamı `False`;
+  canlı okuma çağrıları (`lsd`/`lsf`/`lsjson`/`cat`, bayrak önekli dâhil)
+  retry almaya devam ediyor. `tests/test_retry.py` 86 → 101 test:
+  - `test_konumsal_okuma_sozcugu_yazmayi_retry_ettirmez` (11 vaka, iki
+    sınıflandırıcı),
+  - `test_yazma_kumesi_gercek_rclone_mutasyonlarini_kapsar` (ölçülmüş liste kapısı),
+  - `test_okuma_kumesi_gercek_rclone_mutasyonu_icermez`,
+  - `test_canli_okumalar_veto_genislemesinden_etkilenmedi` (regresyon),
+  - `test_run_cmd_konumsal_tuzakta_tek_deneme` (uçtan uca: tek subprocess).
+- **Test toplamı:** `tests/` 300 → **315 passed** (tamamı yeşil).
+- **Kapsam sınırı:** retry politikası yalnız SINIFLANDIRICI sınırında
+  sertleştirildi; canlı çağrı yerleri (GDrive sürüm listesi ×2, A2A `ping`)
+  zaten tek parçalı okumadır, davranışları değişmedi.
+
 ## [2.6.1] — 2026-09-12 (RETRY SINIFLANDIRICISI: iki ölçülmüş kaçak kapatıldı)
 
 - **Denetim (bağımsız, OceanAPI gpt-5.6-sol DONE-CHECK turu):** denetçinin

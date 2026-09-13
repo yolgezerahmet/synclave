@@ -752,4 +752,90 @@ def test_retry_cagri_yerleri_bilesik_komut_kullanmaz():
         if "def run_cmd" in bag or "def run_with_retry" in bag:
             continue          # tanım satırları (varsayılan değer)
         assert not re.search(r"[|;&]", bag), \
-            f"retries=1 + kabuk ayıracı (retry kaybı): {bag[-90:]!r}"
+            f"retries=1 + kabuk ayırıcı (retry kaybı): {bag[-90:]!r}"
+
+
+# ─── v2.6.2 SINIFLANDIRICI SERTLEŞTİRMESİ (13 Eyl 2026) ────────────────────
+# ÖLÇÜLMÜŞ kaçak: yazma veto kümesi EKSİKTİ. Adı kümede olmayan mutasyon
+# alt-komutları, KONUMSAL argümanı bir okuma sözcüğü olduğunda sınıflandırıcı
+# "okuma" sanıp retry açıyordu — yani "yazmaya ASLA retry" değişmezi
+# sınıflandırıcı sınırında deliniyordu (fail-open).
+# Fix ÖNCESİ ölçüm (bu depo, 13 Eyl 2026):
+#   'rclone moveto cat gdrive:dest'   → True   (MOVE retry)
+#   'rclone touch status gdrive:p'    → True   (WRITE retry)
+#   'rclone deletefile cat remote:x'  → True   (DELETE retry)
+# Fix SONRASI: üçü de False; canlı okuma çağrıları (lsf/cat/lsjson/lsd)
+# retry almaya devam ediyor (aşağıdaki regresyon testi).
+_KONUMSAL_OKUMA_TUZAGI = [
+    ["moveto", "cat", "gdrive:dest"],
+    ["touch", "status", "gdrive:p"],
+    ["deletefile", "cat", "gdrive:x"],
+    ["rmdirs", "lsf", "gdrive:hub"],
+    ["cleanup", "status", "gdrive:hub"],
+    ["copyurl", "cat", "gdrive:dest"],
+    ["bisync", "lsf", "gdrive:a", "gdrive:b"],
+    ["settier", "status", "gdrive:x"],
+    ["rcat", "cat", "gdrive:p"],
+    ["mkdir", "lsf", "gdrive:yeni"],
+    ["dedupe", "lsjson", "gdrive:hub"],
+]
+
+# `rclone help` (rclone v1.60.1, bu makinede ölçüldü) komut listesinden
+# süzülen DURUM DEĞİŞTİREN alt-komutlar. Salt-okuma komutları burada YOK
+# (about/cat/check/checksum/cryptcheck/cryptdecode/hashsum/help/link/
+#  listremotes/ls/lsd/lsf/lsjson/lsl/md5sum/ncdu/obscure/sha1sum/size/
+#  test/tree/version).
+_RCLONE_MUTASYON_ALT_KOMUTLARI = [
+    "authorize", "backend", "bisync", "cleanup", "completion", "config",
+    "copy", "copyto", "copyurl", "dedupe", "delete", "deletefile",
+    "genautocomplete", "gendocs", "mkdir", "mount", "move", "moveto",
+    "purge", "rc", "rcat", "rcd", "reconnect", "rmdir", "rmdirs",
+    "selfupdate", "serve", "settier", "sync", "touch",
+]
+
+
+@pytest.mark.parametrize("args", _KONUMSAL_OKUMA_TUZAGI)
+def test_konumsal_okuma_sozcugu_yazmayi_retry_ettirmez(args):
+    """Mutasyon alt-komutu + konumsal okuma sözcüğü → İKİ taraf da RED.
+
+    Sınıflandırıcı, okuma sözcüğünü PENCEREDE aradığı için (bayrak önekli
+    okumalar kırılmasın diye) konumsal bir 'cat'/'status' argümanı okuma
+    sanılabiliyordu. Veto kümesi artık mutasyon komutlarının tamamını
+    kapsıyor → fail-closed.
+    """
+    cmd = " ".join(["rclone"] + args)
+    assert not sm._is_idempotent_read(cmd), f"yazmaya retry açık: {cmd}"
+    assert not ck._is_rclone_read(args), f"ck yazmaya retry açık: {cmd}"
+
+
+def test_yazma_kumesi_gercek_rclone_mutasyonlarini_kapsar():
+    """Politika kaynağı: ölçülmüş mutasyon listesi veto kümesinde olmalı."""
+    eksik = sorted(set(_RCLONE_MUTASYON_ALT_KOMUTLARI) - set(sm._RETRY_WRITE_TOKENS))
+    assert not eksik, f"veto kümesinde eksik mutasyon alt-komutları: {eksik}"
+
+
+def test_okuma_kumesi_gercek_rclone_mutasyonu_icermez():
+    """Salt-okuma kümesine mutasyon komutu sızmamalı (fail-closed yönü)."""
+    kesisim = sorted(set(sm._RETRY_READ_TOKENS) & set(_RCLONE_MUTASYON_ALT_KOMUTLARI))
+    assert not kesisim, f"okuma kümesinde mutasyon komutu: {kesisim}"
+    assert not (set(ck._RCLONE_READ_COMMANDS) & set(_RCLONE_MUTASYON_ALT_KOMUTLARI))
+
+
+def test_canli_okumalar_veto_genislemesinden_etkilenmedi():
+    """Regresyon: veto büyümesi GERÇEK okuma çağrılarını kırmamalı."""
+    for cmd in ("rclone lsd gdrive:hermes-sync/hahmet/H1/versiyonlu",
+                "rclone lsf gdrive:hub --files-only",
+                "rclone -v lsjson gdrive:hub --hash",
+                "rclone cat gdrive:hub/status.json",
+                "rclone --config /root/.config/rclone/rclone.conf lsf gdrive:hub"):
+        assert sm._is_idempotent_read(cmd), cmd
+
+
+def test_run_cmd_konumsal_tuzakta_tek_deneme(monkeypatch, no_sleep):
+    """Uçtan uca: konumsal tuzak + retries=1 → TEK subprocess çağrısı."""
+    calls = []
+    fake = _make_fake_run([(1, "", "connection reset by peer")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    _out, rc = sm.run_cmd("rclone moveto cat gdrive:dest", retries=1)
+    assert rc == 1
+    assert len(calls) == 1, "konumsal tuzak retry aldı (fail-open)"
