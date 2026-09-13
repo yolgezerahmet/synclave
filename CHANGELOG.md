@@ -1,5 +1,31 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.6.3] — 2026-09-13 (CI YEŞİL: iki ortam-bağımlı kırmızı kapatıldı + fail-closed pid)
+
+- **CI ölçümü (GitHub Actions, `test` job):** son üç koşu kırmızıydı
+  (18s/18s/15s) ve iki test ortam-bağımlıydı — yerelde (root) yeşil,
+  runner'da (root olmayan kullanıcı) kırmızı:
+  1. `test_kopya_parite.py::test_ikiz_depo_paritesi` — `Path('/root/…').is_file()`
+     runner'da **EACCES/PermissionError YÜKSELTİR** (pathlib yalnız
+     ENOENT/ENOTDIR/ELOOP'u yutar) → parity kapısı tüm CI'yi düşürüyordu.
+     Fix: ikiz depo erişimi `try/except OSError` ile korunur; okunamıyorsa
+     test **SKIP** (parite kapısı yalnız erişilebilir olduğunda hüküm verir).
+  2. `test_windows_uyum.py::test_fallback_ileri_tarihli_kayit_fail_closed` —
+     testten BAĞIMSIZ **üretim hatası** ölçüldü: `_pid_canli()` `os.kill`
+     çağrısında EPERM'i de "ölü" sayıyordu. EPERM = "süreç VAR, sinyal
+     yetkimiz yok" → **canlı kilit kaydı devralınabiliyordu (fail-open)**.
+     Fix: `except PermissionError: return True` (EPERM = canlı),
+     `except ProcessLookupError: return False` (ESRCH = ölü); diğer OSError
+     ölü sayılmaya devam eder. Test artık hem root'ta hem runner'da anlamlı.
+- **Yeni kapılar:** `tests/test_windows_uyum.py` +2 test —
+  `test_pid_canli_izin_hatasi_canli_sayilir` (EPERM/ESRCH/OSError/pid≤0
+  sınıflandırması), `test_fallback_canli_yabanci_pid_kaydi_reddeder`
+  (uçtan uca: canlı yabancı pid + taze kayıt → kilit devralınmaz).
+- **Doğrulama:** yerelde `tests/` **317 passed** (315 → 317);
+  ikiz depo (`/root/cumulus-sync-motor`) byte-parite + aynı sürüm.
+- **Not:** 2.6.2'de eklenen 11 konumsal-tuzak vakası ve veto kümesi kapıları
+  bu sürümde aynen geçerlidir.
+
 ## [2.6.2] — 2026-09-13 (RETRY VETO KÜMESİ: ölçülmüş fail-open kapatıldı)
 
 - **Ölçülmüş kaçak (bu depo, fix öncesi):** `_RETRY_WRITE_TOKENS` eksikti;

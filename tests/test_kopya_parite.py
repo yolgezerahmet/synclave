@@ -140,21 +140,40 @@ def test_paket_surumu_tek_kaynak_pyproject_paket_motor():
 
 
 def test_ikiz_depo_paritesi():
-    """Aynı sürümü beyan eden ikiz depo kopyaları byte-eşit olmalı (tüm ortak modüller)."""
+    """Aynı sürümü beyan eden ikiz depo kopyaları byte-eşit olmalı (tüm ortak modüller).
+
+    Erişim koruması (13 Eyl 2026, CI ölçümü): GitHub Actions'ta `/root/` başka
+    kullanıcıya aittir → `Path('/root/...').is_file()` EACCES ile
+    PermissionError YÜKSELTİR (pathlib yalnız ENOENT/ENOTDIR/ELOOP'u yutar) ve
+    tüm CI kırmızıya dönerdi. İkiz depo okunamıyorsa test SKIP edilir —
+    parite kapısı yalnız gerçekten erişilebilir olduğunda hüküm verir.
+    """
     if _ikiz_kapali():
         pytest.skip("ikiz depo parite kontrolü kapatıldı (SYNCLAVE_IKIZ_ZORUNLU=0)")
-    if not (IKIZ_REPO / "sync_motor.py").is_file():
+    try:
+        var_mi = (IKIZ_REPO / "sync_motor.py").is_file()
+    except OSError as e:                    # EACCES/EPERM → ikiz depo okunamaz
+        pytest.skip(f"ikiz depo okunamadı ({e.__class__.__name__}) — parite atlandı")
+    if not var_mi:
         pytest.skip("ikiz depo yok (bu makinede private kopya kurulu değil)")
-    if _surum(_oku(IKIZ_REPO / "sync_motor.py")) != _surum(_oku(MODUL)):
+    try:
+        ikiz_surum = _surum(_oku(IKIZ_REPO / "sync_motor.py"))
+    except OSError as e:
+        pytest.skip(f"ikiz depo okunamadı ({e.__class__.__name__}) — parite atlandı")
+    if ikiz_surum != _surum(_oku(MODUL)):
         pytest.skip(f"ikiz depo farklı sürümde — ayrı iş")
     ayri = []
     for ad in _ortak_moduller(REPO):
         ikiz = IKIZ_REPO / "synclave" / ad
         ikiz_kok = IKIZ_REPO / ad
-        if not ikiz.is_file() or not ikiz_kok.is_file():
-            continue
-        if _oku(REPO / "synclave" / ad) != _oku(ikiz):
+        try:
+            if not ikiz.is_file() or not ikiz_kok.is_file():
+                continue
+            ikiz_icerik, ikiz_kok_icerik = _oku(ikiz), _oku(ikiz_kok)
+        except OSError as e:                # erişim kaybı → bu dosyayı atla
+            pytest.skip(f"ikiz depo okunamadı ({e.__class__.__name__}) — parite atlandı")
+        if _oku(REPO / "synclave" / ad) != ikiz_icerik:
             ayri.append(f"{ad}: paket kopyaları ayrıştı")
-        if _oku(REPO / ad) != _oku(ikiz_kok):
+        if _oku(REPO / ad) != ikiz_kok_icerik:
             ayri.append(f"{ad}: kök kopyaları ayrıştı")
     assert not ayri, "ikiz depo parite sapması:\n" + "\n".join(ayri)

@@ -189,11 +189,25 @@ _KILIT_BAYAT_S = 7200          # kilit API'si yokken: bu yaştan eski kayıt bay
 KILITSIZ = object()            # kilit altyapısı yok → çalışmayı ENGELLEME (sentinel)
 
 def _pid_canli(pid: int) -> bool:
+    """pid canlı mı — FAIL-CLOSED.
+
+    os.kill(pid, 0) hata sınıfları (13 Eyl 2026, CI ölçümü):
+      • PermissionError (EPERM) → süreç VAR, yalnız sinyal yetkimiz yok
+        (başka kullanıcının süreci). ESKİ davranış bunu 'ölü' sayıyordu →
+        canlı kilit kaydı devralınabilirdi (fail-open). Artık CANLI.
+      • ProcessLookupError (ESRCH) → süreç YOK → bayat kayıt devralınır.
+    Ölçüm: pid 1 (init, root) ile çalışan test yalnız root'ta yeşildi;
+    GitHub Actions'ta (runner kullanıcısı) EPERM → False dönüyordu.
+    """
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)                     # Windows: OpenProcess tabanlı
         return True
+    except PermissionError:
+        return True                         # EPERM: süreç var, yetkimiz yok
+    except ProcessLookupError:
+        return False                        # ESRCH: süreç yok
     except OSError:
         return False
 

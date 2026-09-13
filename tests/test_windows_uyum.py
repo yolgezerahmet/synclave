@@ -387,3 +387,52 @@ def test_hub_status_gecici_dosya_istisnada_da_silinir(monkeypatch, tmp_path):
     na._lock_release(fd)
 
 
+
+
+# ─── (e) pid canlılık sınıflandırması — FAIL-CLOSED (13 Eyl 2026, CI) ──────
+# CI ölçümü: `test_fallback_ileri_tarihli_kayit_fail_closed` yalnız root'ta
+# yeşildi. GitHub Actions runner kullanıcısı pid 1'e sinyal gönderemez →
+# os.kill PermissionError (EPERM) atar; eski `except OSError: return False`
+# bunu "süreç yok" sayıyordu → CANLI kilit kaydı devralınabiliyordu
+# (fail-open) ve test kırmızıya düşüyordu. Artık EPERM = CANLI.
+
+def test_pid_canli_izin_hatasi_canli_sayilir(monkeypatch):
+    """EPERM (başka kullanıcının süreci) → CANLI; ESRCH → ölü; diğer OSError → ölü."""
+    def eperm(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(na.os, "kill", eperm)
+    assert na._pid_canli(1) is True, "EPERM yanlışlıkla 'ölü' sayıldı (fail-open)"
+
+    def esrch(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(na.os, "kill", esrch)
+    assert na._pid_canli(4242) is False
+
+    def diger(pid, sig):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(na.os, "kill", diger)
+    assert na._pid_canli(4242) is False
+
+    # pid<=0 hiç syscall yapmadan ölü
+    monkeypatch.setattr(na.os, "kill", lambda p, s: (_ for _ in ()).throw(AssertionError("çağrılmamalı")))
+    assert na._pid_canli(0) is False
+    assert na._pid_canli(-7) is False
+
+
+def test_fallback_canli_yabanci_pid_kaydi_reddeder(monkeypatch, tmp_path):
+    """Uçtan uca: canlı yabancı pid (EPERM) + taze kayıt → kilit DEVralınmaz."""
+    from datetime import datetime
+    p = tmp_path / "cumulus_node_agent.lock"
+    p.write_text(f"1 {datetime.now().isoformat(timespec='seconds')}\n", encoding="utf-8")
+    monkeypatch.setattr(na, "LOCK", str(p))
+    monkeypatch.setattr(na, "fcntl", None)
+    monkeypatch.setattr(na, "msvcrt", None, raising=False)
+
+    def eperm(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(na.os, "kill", eperm)
+    assert na._lock_acquire() is None           # fail-closed: canlı say → RED
