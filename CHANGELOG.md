@@ -1,5 +1,40 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.0] — 2026-09-14 (akıllı hafıza birleştirme + ilerleme yayını)
+
+- **feat: MEMORY.md / USER.md çakışma kopyası yerine BİRLEŞİR (append).** İki
+  makine aynı anda hafıza dosyasına § kaydı eklediğinde pull yolu
+  `.conflict.TS` üretiyordu. Artık YENİ kayıtlar mevcut dosyaya eklenir;
+  hiçbir makinenin eklediği kayıt kaybolmaz ve çakışma kopyası birikmez.
+- **Sertleştirme (gpt-5.6-sol kritik denetimi → 5 bulgu kapatıldı).** İlk
+  sürüm birleşik listeyi dosyaya GERİ YAZIYORDU; üç gerçek kayıp riski vardı:
+  1. uzunluk filtresi (`len(r) > 20`) kısa geçerli kayıtları siliyordu,
+  2. ilk-140-karakter **önek anahtarı** farklı kayıtları tekilleştiriyordu,
+  3. read→rewrite arası eşzamanlı append **son-yazan-kazanır** ile siliniyordu.
+  Bu sürümde: yalnız-append (`os.replace` yok, tek "a" yazımı) · tekilleştirme
+  TAM kayıt metniyle (kısaltma yok) · § ayırıcısı satır-başı + CRLF toleranslı
+  (kayıt içindeki '§' bölmez) · her hata yolunda **fail-closed** → çakışma
+  kopyası (yerel korunur, uzak yazılmaz, kullanıcı kuralı: "bellek içeriği
+  ASLA silinmez").
+- **feat: ilerleme yayını** — `~/.hermes/state/sync_progress.json` (atomik
+  tmp + `os.replace`): koşu, node, yüzde, geçen süre, ETA, node sonuçları,
+  hata. Panel (`sync_web_ui.py`) ve `agent-status` bu dosyayı okur. Yazma
+  yolu yan kanaldır: hata yükseltmez, koşuyu düşüremez.
+- **fix: restic retention `--retry-lock` 5m → 30m.** H2 (Windows) paralel
+  yedek koşusu kilidi tutarken `forget` iki kez başarısız oldu (13-14 Eyl
+  kanıtı); 30m pencere kilidi devralır.
+- **test:** `tests/test_hafiza_merge.py` (kısa kayıt + önek çakışması +
+  idempotent + fail-closed + kaynak kapıları) ve `tests/test_ilerleme.py`
+  (yüzde/ETA matematiği + atomiklik + yan-kanal güvenliği). Ölçülen toplam:
+  **354 passed, 1 skipped** (önceki 316 passed + 1 failed → +38 yeni test;
+  skip = parite kapısı ikiz depo farklı sürümdeyken atlar, senkron sonrası
+  KOŞAR ve yeşildir).
+- **Port kaynağı:** özellikler ilk olarak private `cumulus-sync-motor`
+  kök kopyasında doğmuştu; bu sürümle kanonik hale getirilip DÖRT kopyada
+  (public kök + public paket + private kök + private paket) byte-eşitlendi —
+  parite kapısı `sync_motor.py: kök kopyaları ayrıştı` kırmızısı bu şekilde
+  kapandı.
+
 ## [2.6.3] — 2026-09-13 (CI YEŞİL: iki ortam-bağımlı kırmızı kapatıldı + fail-closed pid)
 
 - **CI ölçümü (GitHub Actions, `test` job):** son üç koşu kırmızıydı

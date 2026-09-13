@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.6.3"
+__version__ = "2.7.0"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -1786,6 +1786,33 @@ def gdrive_pull_latest(cfg, node):
         os.replace(tmp, conflict)
         return conflict
 
+    def _hafiza_elle(member, name, dest):
+        """Hafıza dosyasıysa (§ kayıtlı) çakışma yerine BİRLEŞTİR.
+
+        Dönüş: True = dosya ele alındı (çağıran `continue` etmeli),
+               False = birleştirme yok → çağıran normal çakışma akışını işletir.
+        NOT: `_write_conflict` YEREL dosyanın kopyasını yazar; bu yüzden uzak
+        kayıtların tamamı yerelde varken kopya atlamak hiçbir bilgi kaybetmez.
+        """
+        if os.path.basename(name) not in MEMORY_MERGE_FILES:
+            return False
+        try:
+            mf = tf.extractfile(member)
+            if mf is None:
+                return False
+            eklenen, alt_kume = memory_merge_append(dest, mf.read())
+        except Exception:
+            return False                 # fail-closed → çakışma akışı
+        if eklenen:
+            print(f"    🔀 {name}: {eklenen} kayıt birleştirildi "
+                  f"(append — çakışma kopyası yok)")
+            return True
+        if alt_kume:
+            print(f"    ➖ {name}: yerel güncel (uzak kayıtların tamamı burada) "
+                  f"— kopya yok")
+            return True
+        return False
+
     try:
         with tarfile.open(pkg_file, "r:gz") as tf:
             # SEKANSİYEL iterasyon: gzip akışı tek geçişte açılır.
@@ -1804,6 +1831,10 @@ def gdrive_pull_latest(cfg, node):
                 if os.path.exists(dest):
                     # Önce BOYUT: farklıysa içerik okumaya gerek yok (hızlı yol)
                     if os.path.getsize(dest) != member.size:
+                        # AKILLI BİRLEŞTİRME: hafıza dosyalarında çakışma kopyası
+                        # yerine YENİ kayıtlar append edilir (mevcut içerik korunur).
+                        if _hafiza_elle(member, name, dest):
+                            continue
                         conflict = _write_conflict(dest, src_machine)
                         log.warning(f"Çakışma: {name} → {conflict}")
                         continue  # yereli koru, uzak yazılmaz
@@ -1813,6 +1844,9 @@ def gdrive_pull_latest(cfg, node):
                         local_content = open(dest, "rb").read()
                         if content == local_content:
                             # İçerik AYNI — yeniden yazmaya gerek yok (hızlı yol)
+                            continue
+                        # Aynı boyut + farklı içerik: hafıza dosyasıysa yine birleştir
+                        if _hafiza_elle(member, name, dest):
                             continue
                         # Çakışma — yerel korunur, kopya .conflict.TS ile saklanır
                         conflict = _write_conflict(dest, src_machine)
@@ -1864,6 +1898,84 @@ def verify_build(cfg):
         log.info(f"Build PASS: {pexp}")
         break  # İlk geçerli dizin yeterli
     return True
+
+
+# ── HAFIZA BİRLEŞTİRME (13 Eyl 2026; sertleştirme 14 Eyl 2026) ─────────────
+# MEMORY.md / USER.md gibi § ayırıcılı APPEND-ONLY hafıza dosyaları: iki makine
+# farklı kayıt eklediğinde çakışma kopyası üretmek yerine kayıtlar BİRLEŞİR.
+#
+# NEDEN "yalnız append" (gpt-5.6-sol denetimi, 5 bulgu): birleşik listeyi
+# dosyaya GERİ YAZMAK (tam rewrite) üç gerçek kayıp üretiyordu —
+#   1) uzunluk filtresi (len>20) kısa geçerli kayıtları siliyordu,
+#   2) ilk-140-karakter önek anahtarı farklı kayıtları tekilleştiriyordu,
+#   3) read→rewrite arası eşzamanlı bir append son-yazan-kazanır ile siliniyordu.
+# Bu yüzden mevcut içerik ASLA yeniden yazılmaz; yalnız YENİ kayıtlar APPEND
+# edilir ve tekilleştirme TAM kayıt metniyle yapılır (kısaltma yok).
+MEMORY_MERGE_FILES = {"MEMORY.md", "USER.md"}
+# § ayırıcı: satır-başında; CRLF ve çevre boşluğa toleranslı. Kayıt içindeki
+# satır-ortası '§' bölünmez (eski sabit "\n§\n" deseni bölerdi).
+_MEMORY_REC_SPLIT = re.compile(r"(?m)^[ \t]*§[ \t]*$")
+
+
+def memory_records(text):
+    """§ kayıtlarını döndür — BOŞ kayıt dışında hiçbir kayıt elenmez.
+
+    Uzunluk filtresi YOKTUR: kısa bir kayıt (ör. 12 karakter) geçerli bir
+    hafıza kaydıdır; birleştirme sırasında silinemez.
+    """
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    return [r.strip() for r in _MEMORY_REC_SPLIT.split(t) if r.strip()]
+
+
+def memory_merge_append(dest, incoming_bytes):
+    """Yalnız YENİ § kayıtlarını `dest`'e APPEND et.
+
+    Dönüş: ``(eklenen, uzak_yerelin_alt_kumesi)``
+
+    * ``eklenen > 0`` — yeni kayıtlar append edildi (iki makinenin eklediği de var).
+    * ``eklenen == 0 and uzak_alt_kume`` — uzak dosyanın kayıtlarının TAMAMI
+      yerelde zaten var; bilgi kaybı yok, gerçek çakışma YOK → çağıran çakışma
+      kopyası ÜRETMEZ (kopya birikimi biter; ``_write_conflict`` zaten YEREL
+      dosyanın kopyasını yazar, yani atlanan kopyada kayıp bilgi yoktur).
+    * ``eklenen == 0 and not uzak_alt_kume`` — karar verilemedi (erişim/yapı
+      hatası veya gerçek ayrışma) → fail-closed: çağıran normal çakışma akışını
+      işletir, yerel korunur, uzak yazılmaz.
+
+    Mevcut dosya ASLA yeniden yazılmaz (yalnız "a" modu); böylece kısa kayıtlar
+    filtreden düşemez ve eşzamanlı append son-yazan-kazanır ile silinemez.
+    """
+    try:
+        with open(dest, encoding="utf-8", errors="replace") as f:
+            cur = f.read()
+        if isinstance(incoming_bytes, (bytes, bytearray)):
+            new = incoming_bytes.decode("utf-8", errors="replace")
+        else:
+            new = str(incoming_bytes)
+    except Exception:
+        return 0, False                 # okunamadı → çakışma akışı (fail-closed)
+    mevcut = memory_records(cur)
+    if not mevcut:
+        return 0, False                 # dosyada kayıt yok (boş/yalnız boşluk)
+    uzak = memory_records(new)
+    if not uzak:
+        return 0, False                 # uzakta kayıt yok → karar verilemez
+    gorulen = set(mevcut)               # TAM metin anahtarı (önek/kısaltma yok)
+    yeni = []
+    for r in uzak:                      # paket içindeki tekrarlar da bir kez eklenir
+        if r in gorulen:
+            continue
+        gorulen.add(r)
+        yeni.append(r)
+    if not yeni:
+        return 0, True                  # uzak ⊆ yerel → gerçek çakışma değil
+    # Ayraç biçimi mevcut dosyayla aynı kalır: kayıtlar "\n§\n" ile dizilir.
+    ek = ("" if cur.endswith("\n") else "\n") + "§\n" + "\n§\n".join(yeni) + "\n"
+    try:
+        with open(dest, "a", encoding="utf-8") as f:
+            f.write(ek)
+    except OSError:
+        return 0, False                 # yazamadı → yerel bozulmaz, çakışma akışı
+    return len(yeni), False
 
 
 def cmd_pull(cfg):
@@ -2827,7 +2939,9 @@ def cmd_restic_backup(cfg, node=None, dry_run=False):
         # (--prune tüm repo'yu GC'ler, 55 snapshot'ta dakikalar sürer; her koşuda
         # yapılırsa H1 backup cron'u uzar ve diğer sync'ler kilit yüzünden atlanır)
         args = ["forget", "--keep-daily", "7", "--keep-weekly", "4",
-                "--keep-monthly", "6", "--retry-lock", "5m"]
+                # --retry-lock 30m: H2 (Windows) paralel backup sırasında kilidi
+                # tutuyor; 5m yetmiyordu (13-14 Eyl kanıtı: iki kez başarısız).
+                "--keep-monthly", "6", "--retry-lock", "30m"]
         _h = time.localtime().tm_hour
         if _h in (4,):
             args += ["--prune"]
@@ -2907,6 +3021,70 @@ def cmd_task(cfg, aksiyon, task_id="", title="", token="", dry_run=False):
     print("Kullanım: task add|list|claim|done")
     return 1
 
+
+# ── İLERLEME YAYINI (13 Eyl 2026) ──────────────────────────────────────────
+# Panel (sync_web_ui.py) ve agent-status bu dosyayı okur: hangi node, yüzde
+# kaç, ne kadar sürdü, ETA. Yazma ATOMİK (tmp + os.replace) — okuyucu yarım
+# JSON görmez. progress_write asla istisna yükseltmez: ilerleme yayını bir
+# koşuyu düşüremez (yan kanal, üretim yolu değil).
+_PROGRESS_PATH = os.path.expanduser("~/.hermes/state/sync_progress.json")
+
+
+def progress_write(**kw):
+    """Sync ilerleme durumunu yaz (panel okur). Atomik, istisna yükseltmez."""
+    try:
+        os.makedirs(os.path.dirname(_PROGRESS_PATH), exist_ok=True)
+        cur = {}
+        if os.path.exists(_PROGRESS_PATH):
+            try:
+                with open(_PROGRESS_PATH, encoding="utf-8") as f:
+                    cur = json.load(f)
+            except Exception:
+                cur = {}
+        cur.update(kw)
+        cur["updated"] = _now_iso_utc()
+        tmp = _PROGRESS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _PROGRESS_PATH)
+    except Exception:
+        pass
+
+
+def progress_start(cmd, nodes):
+    """Koşu başlangıcı: durum sıfırla."""
+    progress_write(running=True, cmd=cmd, total=len(nodes), done=0,
+                   current=None, percent=0, started=time.time(),
+                   nodes_done={}, error=None, eta_s=None)
+
+
+def progress_step(idx, total, node, started, nodes_done):
+    """Her node başında: yüzde + ETA (geçen süreden doğrusal kestirim)."""
+    elapsed = time.time() - started
+    done = idx - 1
+    pct = int(done * 100 / total) if total else 0
+    eta = None
+    if done > 0 and elapsed > 0:
+        eta = int((elapsed / done) * (total - done))
+    progress_write(running=True, current=node, done=done, total=total,
+                   percent=pct, elapsed_s=int(elapsed), eta_s=eta,
+                   nodes_done=nodes_done)
+
+
+def progress_node_done(node, status, nodes_done):
+    """Node bitti: sonucu kaydet (kopya üzerinde — çağıranın map'i bozulmaz)."""
+    nodes_done = dict(nodes_done)
+    nodes_done[node] = status
+    progress_write(nodes_done=nodes_done, last_node=node, last_status=status)
+
+
+def progress_finish(ok=True, error=None):
+    """Koşu bitti: yüzde 100, running=False."""
+    progress_write(running=False, percent=100 if ok else None,
+                   current=None, finished=_now_iso_utc(), error=error,
+                   elapsed_s=None)
+
+
 def cmd_backup(cfg, node=None, hub=None, dry_run=False):
     """GDrive versiyon takipli yedek (timestamp snapshot; silmez).
 
@@ -2933,13 +3111,21 @@ def cmd_backup(cfg, node=None, hub=None, dry_run=False):
     except Exception:
         pass
     tmp = tempfile.mkdtemp(prefix="syncver_")
+    _p_started = time.time()
+    _p_done_map = {}
+    progress_start("backup", nodes)
+    _p_fail = None
     try:
-        for n in nodes:
+        for _p_i, n in enumerate(nodes, 1):
+            progress_step(_p_i, len(nodes), n, _p_started, _p_done_map)
             tarp, sha = _tar_node(cfg, n, tmp, time.strftime("%Y%m%d_%H%M%S"))
             if not tarp:
-                print(f"    ⚠ {n}: atlandı (kaynak yok veya max_kb — yukarıya bak)"); continue
+                print(f"    ⚠ {n}: atlandı (kaynak yok veya max_kb — yukarıya bak)")
+                progress_node_done(n, "atlandı", _p_done_map)
+                continue
             if dry_run:
                 print(f"    [DRY] {n}: {os.path.basename(tarp)} ({os.path.getsize(tarp)//1024}KB) sha={sha[:12]}")
+                progress_node_done(n, "dry-run", _p_done_map)
                 continue
             r = subprocess.run(["rclone", "copyto", tarp,
                                 f"{hub}/{n}/{os.path.basename(tarp)}",
@@ -2961,8 +3147,11 @@ def cmd_backup(cfg, node=None, hub=None, dry_run=False):
                         verified = False
                 tag_txt = " ✅ SHA doğrulandı" if verified else " ⚠ SHA doğrulanamadı (lsjson hash kapalı olabilir)"
                 print(f"    ✅ {n}: {os.path.basename(tarp)} sha={sha[:12]}{tag_txt}")
+                progress_node_done(n, "ok" if verified else "ok (sha?)", _p_done_map)
             else:
                 print(f"    ❌ {n}: {r.stderr.strip()[:120]}")
+                _p_fail = f"{n}: {r.stderr.strip()[:80]}"
+                progress_node_done(n, "HATA", _p_done_map)
             # FIX: upload bitti → tar'ı HEMEN sil (birikme yok)
             try:
                 os.remove(tarp)
@@ -2970,6 +3159,7 @@ def cmd_backup(cfg, node=None, hub=None, dry_run=False):
                 pass
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        progress_finish(ok=(_p_fail is None), error=_p_fail)
         # FIX: stale syncver_* dizinleri (önceki koşulardan kalan) temizle —
         # yalnız 10 dk'dan eski (eşzamanlı koşu koruması, v3 24 Ağu)
         try:
