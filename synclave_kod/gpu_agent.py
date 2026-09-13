@@ -43,6 +43,19 @@ except Exception:
     AI = None
     IDENTITY_OK = False
 
+# ZORUNLU MODÜL KAPSAMI İMPORTU (31 Ağu 2026 düzeltmesi):
+# Dosyanın başındaki `from __future__ import annotations` tüm tip ipuçlarını
+# metne çevirir. FastAPI bu metni rota fonksiyonunun __globals__ sözlüğü, yani
+# MODÜL kapsamı üzerinden çözer. `Request` yalnızca build_app() içinde import
+# edilirse ad modül kapsamında bulunamaz; FastAPI parametreyi gövde yerine
+# QUERY olarak yorumlar ve POST /analyze isteği "?request= gerekli" diyerek
+# HTTP 422 döner. Aşağıdaki import bu çözümlemeyi mümkün kılar.
+try:
+    from fastapi import Request  # noqa: F401
+    from fastapi.responses import JSONResponse  # noqa: F401
+except Exception:  # fastapi kurulu değilse sunucu zaten başlamaz
+    pass
+
 
 def _detect_motor() -> dict:
     """H2'de hangi GPU inference motoru çalışıyor?"""
@@ -61,12 +74,40 @@ def _detect_motor() -> dict:
     return {"motor": None, "url": None}
 
 
+def _pick_model(modeller: list[str]) -> str:
+    """Analiz için uygun sohbet modelini seç.
+
+    Eski davranış `modeller[0]` idi; Ollama etiket sırası değişkendir. Sıranın
+    başına bir gömme (embedding) modeli düşerse — bge-m3 veya nomic-embed-text
+    gibi — /api/generate boş yanıt üretir ve analiz tamamen çöker. Bu yüzden
+    gömme modelleri dışlanır, proje için doğrulanmış Türkçe/teknik modeller
+    öncelik sırasıyla denenir.
+    """
+    GOMME = ("bge-", "nomic-embed", "-embed", "embed-")
+    sohbet = [m for m in modeller if not any(g in m.lower() for g in GOMME)]
+
+    zorunlu = os.environ.get("GPU_MODEL", "").strip()
+    if zorunlu:
+        for m in modeller:
+            if m == zorunlu or m.startswith(zorunlu):
+                return m
+
+    # Öncelik: Türkçe kalitesi ve teknik doğruluğu ölçülmüş modeller önce
+    TERCIH = ("gemma4:e4b", "Kizagan-E4B-Turkish-Reasoning", "g4q",
+              "phi4", "gemma4", "llama3.2")
+    for tercih in TERCIH:
+        for m in sohbet:
+            if tercih.lower() in m.lower():
+                return m
+    return sohbet[0] if sohbet else (modeller[0] if modeller else "")
+
+
 def _ollama_generate(prompt: str, model: str = "") -> str:
     """Ollama üzerinden üretim (varsayılan model otomatik)."""
     tags = json.loads(urllib.request.urlopen(
         "http://127.0.0.1:11434/api/tags", timeout=5).read().decode())
     modeller = [m["name"] for m in tags.get("models", [])]
-    sec = model or (modeller[0] if modeller else "")
+    sec = model or _pick_model(modeller)
     if not sec:
         return "Ollama kurulu ama model yok (ollama pull <model>)"
     body = json.dumps({"model": sec, "prompt": prompt,
@@ -138,13 +179,19 @@ def build_app(token: str):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         body = await request.json()
         gorev = body.get("task", "")
+        istenen_model = (body.get("model") or "").strip()
         if not gorev:
             return JSONResponse({"error": "task gerekli"}, status_code=400)
         motor = _detect_motor()
         t0 = time.time()
+        kullanilan = istenen_model or "-"
         try:
             if motor["motor"] == "ollama":
-                sonuc = _ollama_generate(gorev)
+                tags = json.loads(urllib.request.urlopen(
+                    "http://127.0.0.1:11434/api/tags", timeout=5).read().decode())
+                kullanilan = istenen_model or _pick_model(
+                    [m["name"] for m in tags.get("models", [])])
+                sonuc = _ollama_generate(gorev, kullanilan)
             elif motor["motor"] == "llama.cpp":
                 sonuc = _llamacpp_generate(gorev)
             elif motor["motor"] == "vllm":
@@ -156,6 +203,7 @@ def build_app(token: str):
                            "https://ollama.com/download (RTX 5070 Ti için)",
                 }, status_code=503)
             return {"result": sonuc, "motor": motor["motor"],
+                    "model": kullanilan,
                     "ms": round((time.time() - t0) * 1000)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)

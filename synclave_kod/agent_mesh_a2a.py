@@ -68,6 +68,40 @@ def _save_tasks(tasks: dict):
     except Exception:
         pass
 
+
+def _push_notify(callback: str, task_id: str, status: str, result: dict):
+    """Async görev tamamlanınca gönderen node'a İMZALI bildirim (gerçek zamanlı).
+
+    Gönderenin a2a_cli'si metadata.callback = "IP:PORT" ekler; görev bitince
+    buraya POST /notify atılır → gönderen polling YAPMADAN anında öğrenir.
+    Güvenlik: kendi kimliğimizle imzalanır; alıcı TOFU + imza doğrular.
+    """
+    ident = identity()
+    if not ident or not callback or ":" not in callback:
+        return
+    import urllib.request
+    host, port = callback.rsplit(":", 1)
+    try:
+        port = int(port)
+    except ValueError:
+        return
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "task/notify",
+                       "params": {"task_id": task_id, "status": status,
+                                  "result": result}}).encode()
+    headers = {"Content-Type": "application/json",
+               **ident.sign_request("task/notify", body)}
+    # Bearer token da gönder (check_auth her istekte zorunlu)
+    tok = os.environ.get("A2A_TOKEN", "")
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(
+        f"http://{host}:{port}/", data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            r.read()
+    except Exception:
+        pass  # bildirim başarısız — gönderen yine de task/get ile alabilir
+
 TASKS: dict = _load_tasks()
 
 
@@ -105,6 +139,7 @@ def _uptime_s():
 def agent_card(host: str, port: int) -> dict:
     card = {
         "protocolVersion": "1.0",
+        "__version__": "1.1.0",
         "name": f"cumulus-agent-{_hostname()}",
         "description": "CumulusNET agent mesh — görev alır, yerel inbox'a yazar, durum döner",
         "url": f"http://{host}:{port}/",
@@ -123,6 +158,9 @@ def agent_card(host: str, port: int) -> dict:
         card["name"] = f"cumulus-{ident.runtime}-{ident.short}"
         card["capabilities"]["signedRequests"] = True
         card["capabilities"]["encryptedRequests"] = True
+        # GERÇEK ZAMANLI (30 Ağu 2026): async görev bitince gönderen node'a
+        # push bildirimi — karşı taraf polling yapmadan anında öğrenir.
+        card["capabilities"]["pushNotifications"] = True
         card["capabilities"]["requireSignature"] = REQUIRE_SIG
     return card
 
@@ -196,14 +234,17 @@ def dispatch(method: str, params: dict) -> dict:
         if mode == "async":
             # arka planda işle (thread); sonuç store'a yazılır, task/get ile alınır
             import threading
+            callback = (params.get("metadata") or {}).get("callback", "")
             def _run():
                 try:
                     status, result = execute_task(params)
                     TASKS[task_id] = {"status": status, "result": result,
                                       "created": time.time(), "mode": "async"}
+                    _push_notify(callback, task_id, status, result)
                 except Exception as e:
                     TASKS[task_id] = {"status": "failed", "result": {"error": str(e)},
                                       "created": time.time(), "mode": "async"}
+                    _push_notify(callback, task_id, "failed", {"error": str(e)})
                 _save_tasks(TASKS)
             threading.Thread(target=_run, daemon=True).start()
             return {"id": task_id, "status": "working", "result": None, "mode": "async"}
@@ -229,7 +270,9 @@ def dispatch(method: str, params: dict) -> dict:
                 pass
         t = TASKS.get(tid)
         if not t:
-            raise KeyError(f"task {tid} yok")
+            # FIX (31 Ağu): bilinmeyen task 400/KeyError yerine temiz 'not_found'
+            # döner — ajanlar yanlış id sorgulayınca kafa karıştırıcı 400 almaz.
+            return {"id": tid, "status": "not_found", "result": None}
         return {"id": tid, "status": t["status"], "result": t["result"], "mode": t.get("mode", "sync")}
     if method == "task/cancel":
         tid = params.get("id", "")
@@ -242,6 +285,30 @@ def dispatch(method: str, params: dict) -> dict:
     if method == "message/sendSubscribe":
         # Canlı mesaj akışı (SSE) — dispatch içinde işlenmez; /stream endpoint'ine yönlendir
         return {"ok": True, "stream": f"/stream?message={params.get('message', '')[:50]}"}
+    if method == "task/notify":
+        # Diğer node'dan gelen PUSH bildirimi — async görev tamamlandı.
+        # Alıcı taraf bu bildirimi "tamamlanan görev" olarak işaretler.
+        tid = params.get("task_id", "")
+        if tid:
+            # bilinmeyen id de kaydedilir (gönderen taraf kendi takibini yapar)
+            if tid not in TASKS:
+                TASKS[tid] = {"status": "working", "result": None,
+                              "created": time.time(), "mode": "async"}
+            TASKS[tid]["status"] = params.get("status", "completed")
+            TASKS[tid]["result"] = params.get("result")
+            TASKS[tid]["notified_at"] = time.time()
+            _save_tasks(TASKS)
+        return {"ok": True, "notified": bool(tid)}
+    if method == "task/list":
+        # Uzak sunucudaki görev listesi (a2a_cli 'tasks' komutu).
+        # TASKS: id -> {status, result, created, mode, ...}; en yeni önce.
+        items = [
+            {"id": tid, "status": t.get("status", "?"),
+             "mode": t.get("mode", "sync"), "created": t.get("created")}
+            for tid, t in TASKS.items()
+        ]
+        items.sort(key=lambda x: x.get("created") or 0, reverse=True)
+        return {"tasks": items}
     raise KeyError(f"bilinmeyen metod: {method}")
 
 # ─── FastAPI uygulaması ───────────────────────────────────────────────
@@ -401,6 +468,34 @@ def build_app(token: str):
             yield "event: done\ndata: {}\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @app.get("/events")
+    async def events(request: Request, seconds: int = 30):
+        """GERÇEK ZAMANLI görev akışı (SSE) — async görev durum değişimlerini
+        canlı yayınlar. Kullanım: GET /events?seconds=30
+        (node'lar birbirinin görevlerini anında görür; polling GEREKMEZ)."""
+        from fastapi.responses import StreamingResponse
+        if not check_auth(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        seconds = min(max(int(seconds), 5), 300)
+        last_len = len(TASKS)
+        nonlocal_guard = {"last_len": last_len}
+
+        async def gen():
+            import asyncio as _asyncio
+            start = time.time()
+            yield "event: open\ndata: {\"status\": \"connected\", \"tasks\": " + str(nonlocal_guard["last_len"]) + "}\n\n"
+            while time.time() - start < seconds:
+                cur = len(TASKS)
+                done = [{"id": k, "status": v.get("status"),
+                         "ts": v.get("created")}
+                        for k, v in list(TASKS.items())[-3:]]
+                if cur != nonlocal_guard["last_len"] or done:
+                    yield f"event: task\ndata: {json.dumps({'total': cur, 'recent': done}, ensure_ascii=False)}\n\n"
+                    nonlocal_guard["last_len"] = cur
+                await _asyncio.sleep(1)
+            yield "event: done\ndata: {}\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
     return app
 
 def main():
@@ -425,7 +520,7 @@ def main():
     except ImportError:
         # Windows (H2) dahil temiz kurulum hatası — ham traceback yerine
         print("HATA: 'uvicorn' paketi yok — A2A mesh server başlatılamaz.\n"
-              "      Kur: pip install uvicorn  (veya pip install 'hermes-sync[server]')")
+              "      Kur: pip install uvicorn  (veya pip install 'synclave[a2a]')")
         sys.exit(1)
     app = build_app(args.token)
     ident = identity()

@@ -23,6 +23,13 @@
 - **fix: restic retention `--retry-lock` 5m → 30m.** H2 (Windows) paralel
   yedek koşusu kilidi tutarken `forget` iki kez başarısız oldu (13-14 Eyl
   kanıtı); 30m pencere kilidi devralır.
+- **fix: node kodu paketi (`synclave_kod/`) kanonikle hizalandı.** Node'lara düz
+  modül paketi olarak verilen dizinde yedi modülden dördü BAYATTI (sync_motor
+  2.2.0 ↔ 2.7.0, a2a_cli 164 ↔ 266 satır, agent_mesh_a2a 440 ↔ 535,
+  gpu_agent 181 ↔ 229) ve `h2_dogrula.py` bu dizinden import ediyor. Bu sapma
+  sınıfı bu depoyu bir kez üretimde vurmuştu ("kök kopya düzeltmeyi taşımıyor,
+  testler paket kopyasını okuduğu için görünmüyordu") → dört dosya hizalandı ve
+  `tests/test_node_paketi_parite.py` (8 test) kapısı eklendi; dizin yoksa SKIP.
 - **test:** `tests/test_hafiza_merge.py` (kısa kayıt + önek çakışması +
   idempotent + alt-küme + fail-closed + kaynak kapıları), `tests/test_ilerleme.py`
   (yüzde/ETA matematiği + atomiklik + yan-kanal güvenliği) ve
@@ -30,8 +37,8 @@
   mock'lu, tar.gz gerçek — birleşme + kopya üretilmeme kanıtı; ayrıca hafıza
   dışı dosyada eski çakışma davranışının korunduğu). Mutasyon kanıtı: birleştirme
   devre dışı bırakıldığında e2e testi ÇÖKER (kayıt kaybı + kopya üretimi
-  gözlemlendi) — test kanıt, iddia değil. Ölçülen toplam: **359 passed, 0 skipped**
-  (önceki durum: 316 passed + 1 failed; +42 yeni test).
+  gözlemlendi) — test kanıt, iddia değil. Ölçülen toplam: **367 passed, 0 skipped**
+  (önceki durum: 316 passed + 1 failed; +50 yeni test).
 - **Port kaynağı:** özellikler ilk olarak private `cumulus-sync-motor`
   kök kopyasında doğmuştu; bu sürümle kanonik hale getirilip DÖRT kopyada
   (public kök + public paket + private kök + private paket) byte-eşitlendi —

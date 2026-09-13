@@ -14,10 +14,14 @@ Host örnekleri: 100.103.44.107 (H3), 100.92.2.47 (H1), 100.76.82.46 (H2)
 # pyright: reportOptionalMemberAccess=false
 import argparse
 import json
+import os
+import socket
+import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,9 +66,35 @@ def peer_card(host: str, port: int = 8643):
         return hit[0] if hit else {}
 
 
+def canonical_host(host: str) -> str:
+    """Kanonik H1/H2/H3 takma adlarını tek IP'ye çevir."""
+    aliases = {
+        "h1": "100.92.2.47",
+        "cumulusnet-hermes-1": "100.92.2.47",
+        "h2": "100.76.82.46",
+        "sistemg16": "100.76.82.46",
+        "h3": "100.103.44.107",
+        "hermesagent03": "100.103.44.107",
+    }
+    return aliases.get(host.strip().lower(), host.strip())
+
+
 def rpc(host: str, method: str, params: dict, token: str, port: int = 8643,
-        sign: bool = True, conv_id: str = "", encrypt: bool = True):
+        sign: bool = True, conv_id: str = "", encrypt: bool = True,
+        retries: int = 0):
+    # Yeniden gönderim yalnızca health gibi salt-okunur RPC'lerde güvenlidir.
+    # İmzalı/şifreli task isteğinde aynı nonce ile retry çift görev veya replay
+    # reddi üretebilir; bu yol açıkça kapalı tutulur.
+    if retries and method != "ping":
+        retries = 0
+    host = canonical_host(host)
     url = f"http://{host}:{port}/"
+    # GERÇEK ZAMANLI (30 Ağu 2026): async görev gönderirken kendi callback
+    # adresimizi ekle → karşı taraf görev bitince BİZE push eder (polling yok).
+    if method == "task/send" and isinstance(params, dict):
+        md = dict(params.get("metadata", {}) or {})
+        md.setdefault("callback", f"{_self_addr()}:8643")
+        params["metadata"] = md
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     if token:
@@ -95,8 +125,21 @@ def rpc(host: str, method: str, params: dict, token: str, port: int = 8643,
             req.add_header("X-Agent-Label", ident.meta.get("machine_label", ""))
             if conv_id:
                 req.add_header("X-Conversation-Id", conv_id)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        out = json.loads(resp.read().decode())
+    attempts = max(0, int(retries)) + 1
+    out = None
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                out = json.loads(resp.read().decode())
+            break
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(min(2 ** attempt, 4))
+    if out is None:
+        raise RuntimeError(f"A2A yanıtı alınamadı: {last_error}")
     # Giden mesajı yerel sohbet defterine işle (karşı tarafın agent_id'si ile)
     peer = ((out.get("result") or {}).get("served_by") or "") if isinstance(out, dict) else ""
     if ident and peer.startswith(("hx-", "oc-")):
@@ -111,9 +154,37 @@ def rpc(host: str, method: str, params: dict, token: str, port: int = 8643,
             pass
     return out
 
+
+def _self_addr() -> str:
+    """Kendi (gönderen) Tailscale/IP adresini bul — push bildiriminin hedefi.
+    Öncelik: A2A_CALLBACK env > Tailscale IP (tailscale ip -4) > 100.x ağı."""
+    env = os.environ.get("A2A_CALLBACK", "")
+    if env and ":" in env:
+        return env.split(":")[0]
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                           text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            ip = r.stdout.strip().split()[0]
+            if ip.startswith("100."):
+                return ip
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("100.64.0.1", 9))  # Tailscale ağına bağlan (dışarı paket yok)
+        ip = s.getsockname()[0]
+        s.close()
+        if ip.startswith("100."):
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("komut", choices=["send", "send-status", "get", "card", "ping", "stream"])
+    ap.add_argument("komut", choices=["send", "send-status", "get", "card", "ping", "stream",
+                                      "update", "info", "tasks"])
     ap.add_argument("host")
     ap.add_argument("gorev", nargs="?", default="")
     ap.add_argument("--task-id", default="")
@@ -124,6 +195,7 @@ def main():
     ap.add_argument("--no-sign", action="store_true", help="imzasız gönder (eski uyum)")
     ap.add_argument("--conv", default="", help="mevcut sohbet ID'si ile devam et")
     args = ap.parse_args()
+    args.host = canonical_host(args.host)
     sign = not args.no_sign
 
     try:
@@ -148,6 +220,36 @@ def main():
             req = urllib.request.Request(f"http://{args.host}:{args.port}/health")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 print(resp.read().decode())
+        elif args.komut == "update":
+            # Kullanım: update <host> URL#SHA256 — güvenli agent-update görevi gönderir.
+            if not args.gorev or "#" not in args.gorev:
+                raise SystemExit("update için URL#SHA256 gerekli: update h2 http://...tar.gz#<sha>")
+            url, sha = args.gorev.rsplit("#", 1)
+            try:
+                from synclave.inbox_worker import build_agent_update_task
+            except ImportError:
+                from inbox_worker import build_agent_update_task
+            task = build_agent_update_task(url, sha)
+            r = rpc(args.host, "task/send",
+                    {"payload": {"action": "note", "text": task}, "mode": args.mode},
+                    args.token, args.port, sign=sign, conv_id=args.conv)
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+        elif args.komut == "info":
+            # Kimlik + sağlık tek çıktıda (çift taraflı düğüm görünürlüğü).
+            card = peer_card(args.host, args.port)
+            health = {}
+            try:
+                req = urllib.request.Request(f"http://{args.host}:{args.port}/health")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    health = json.loads(resp.read().decode())
+            except Exception as e:
+                health = {"error": str(e)}
+            print(json.dumps({"health": health, "card": card}, ensure_ascii=False, indent=2))
+        elif args.komut == "tasks":
+            # Uzak sunucudaki görev listesi (task/list).
+            r = rpc(args.host, "task/list", {}, args.token, args.port,
+                    sign=sign, conv_id=args.conv)
+            print(json.dumps(r, ensure_ascii=False, indent=2))
         elif args.komut == "stream":
             # Canlı SSE akışı: H1 → H3 mesaj akışını dinle
             url = f"http://{args.host}:{args.port}/stream?message={urllib.parse.quote(args.gorev or 'selam')}&seconds={args.seconds}"
