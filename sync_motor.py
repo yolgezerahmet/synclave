@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.2"
+__version__ = "2.7.3"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -3196,10 +3196,35 @@ def cmd_backup(cfg, node=None, hub=None, dry_run=False):
                 print(f"    [DRY] {n}: {os.path.basename(tarp)} ({os.path.getsize(tarp)//1024}KB) sha={sha[:12]}")
                 progress_node_done(n, "dry-run", _p_done_map)
                 continue
-            r = subprocess.run(["rclone", "copyto", tarp,
-                                f"{hub}/{n}/{os.path.basename(tarp)}",
-                                "--ignore-checksum", "--no-traverse"],
-                               capture_output=True, text=True, errors="replace")
+            # 14 Eyl 2026 FIX (cron 3600s timeout olayı): bu upload SINIRSIZDI.
+            # GDrive throttle'da (shared client_id) rclone asılı kalıyordu → süreç
+            # sonsuza kadar bekliyor, cron 3600s'te SIGTERM atıyor, stdout
+            # blok-tamponlu olduğu için log BOŞ kalıyor (tanı imkânsız) ve sync
+            # kilidi saatlerce tutuluyor (delta koşuları da atlanıyor).
+            # Diğer TÜM rclone çağrıları 180s sınırlı; bu da aynı sınıra çekildi.
+            # TEK DENEME: 'copyto' uzak hedefe YAZMADIR → "yazmaya asla retry"
+            # kuralı gereği çağrı seviyesinde retry YOK (denetim bulgusu: eski
+            # 2-denemeli döngü bu kuralı ihlal ediyordu ve timeout sonrası uzak
+            # nesnenin durumu bilinmeden tekrar yazıyordu). Retry RUN seviyesinde
+            # zaten var: node zaman aşımında atlanır, sonraki koşu (90 dk) telafi
+            # eder. Zaman aşımı fail-closed: node TIMEOUT işaretlenir, tarp
+            # silinir, uzak nesne için "yazıldı" İDDİASI üretilmez.
+            try:
+                r = subprocess.run(["rclone", "copyto", tarp,
+                                    f"{hub}/{n}/{os.path.basename(tarp)}",
+                                    "--ignore-checksum", "--no-traverse"],
+                                   capture_output=True, text=True,
+                                   errors="replace", timeout=180)
+            except subprocess.TimeoutExpired:
+                _p_fail = f"{n}: upload timeout 180s"
+                print(f"    ⏱ {n}: upload 180s aşıldı (GDrive throttle veya ağ) — "
+                      f"node atlandı, sonraki koşu telafi eder", flush=True)
+                progress_node_done(n, "TIMEOUT", _p_done_map)
+                try:
+                    os.remove(tarp)
+                except OSError:
+                    pass
+                continue
             if r.returncode == 0:
                 # C modülü (v2.1): upload sonrası SHA doğrulama —
                 # GDrive'daki hash'i çek, yerel sha ile karşılaştır.
@@ -3412,8 +3437,23 @@ def cmd_rollback(cfg, node, version, hub=None, force=False, dry_run=False):
     tmp = tempfile.mkdtemp(prefix="syncrb_")
     try:
         tarp = os.path.join(tmp, version)
-        r = subprocess.run(["rclone", "copyto", f"{hub}/{node}/{version}", tarp],
-                           capture_output=True, text=True, errors="replace")
+        # 14 Eyl 2026 FIX (ikiz depo parite kapısı bulgusu): bu indirme SINIRSIZDI.
+        # GDrive throttle'da (shared client_id) rclone asılı kalır → cron 3600s'te
+        # SIGTERM atar, tanı logu boş kalır ve kilit saatlerce tutulur. Diğer TÜM
+        # rclone çağrıları 180s sınırlı; bu da aynı sınıra çekildi.
+        # NOT: 'copyto' yazma sözcüğüdür → retry YOK (politika: yazmaya asla retry).
+        # Hedef dış dizin (base) DEĞİL, taze mkdtemp'tir: zaman aşımında hedefe
+        # hiçbir şey yazılmaz; geçici dizindeki kısmi indirme finally rmtree ile
+        # silinir (kalıcı/uygulanan bir etki bırakmaz). Fail-closed: rc=1, geri
+        # alma/uygulama aşamasına GEÇİLMEZ.
+        try:
+            r = subprocess.run(["rclone", "copyto", f"{hub}/{node}/{version}", tarp],
+                               capture_output=True, text=True,
+                               errors="replace", timeout=180)
+        except subprocess.TimeoutExpired:
+            print(f"    ⏱ indirme 180s aşıldı (GDrive throttle veya ağ) — "
+                  f"hiçbir dosya uygulanmadı: {hub}/{node}/{version}")
+            return 1
         if r.returncode != 0:
             print(f"    ❌ indirme hatası: {r.stderr.strip()[:120]}")
             return 1

@@ -839,3 +839,181 @@ def test_run_cmd_konumsal_tuzakta_tek_deneme(monkeypatch, no_sleep):
     _out, rc = sm.run_cmd("rclone moveto cat gdrive:dest", retries=1)
     assert rc == 1
     assert len(calls) == 1, "konumsal tuzak retry aldı (fail-open)"
+
+
+# ─── SINIRSIZ rclone ÇAĞRISI KAPISI (14 Eyl 2026) ───────────────────────
+# Ölçülen olay: backup upload `rclone copyto` çağrısı SINIRSIZDI. GDrive
+# throttle'da (shared client_id) rclone asılı kaldı → cron 3600s'te SIGTERM
+# attı, stdout blok-tamponlu olduğu için log BOŞ kaldı (tanı imkânsız) ve sync
+# kilidi saatlerce tutuldu (delta koşuları da atlandı). Parite kapısı aynı
+# sınıfın ikinci örneğini `cmd_rollback` indirmesinde buldu (timeout yok).
+# Kural: retry EKLENMESİ yetmez — asıl güvence her çağrının SINIRLI olmasıdır.
+
+def _rclone_subprocess_bloklari(kaynak: str):
+    """subprocess.run(...) bloklarını DENGELİ parantezle çıkarır → (satır, blok).
+
+    Düz regex iç içe parantezde erken kesiyor (`os.path.basename(tarp)`) ve
+    timeout'suz çağrıyı 'timeout var' sanıyordu — bu yüzden dengeli tarama.
+    """
+    satirlar = kaynak.splitlines()
+    bloklar = []
+    for i, satir in enumerate(satirlar):
+        if "subprocess.run(" not in satir:
+            continue
+        buf, j = satir, i
+        derinlik = buf.count("(") - buf.count(")")
+        while derinlik > 0 and j + 1 < len(satirlar):
+            j += 1
+            buf += "\n" + satirlar[j]
+            derinlik = buf.count("(") - buf.count(")")
+        bloklar.append((i + 1, buf))
+    return bloklar
+
+
+def test_rclone_subprocess_blok_taramasi_dogru():
+    """Kapının dedektörü: dengeli tarama iç içe parantezde kesmemeli."""
+    ornek = ('r = subprocess.run(["rclone", "copyto", t,\n'
+             '                   os.path.basename(t)], timeout=180)\n')
+    bloklar = _rclone_subprocess_bloklari(ornek)
+    assert len(bloklar) == 1
+    assert "timeout=180" in bloklar[0][1], "tarama blok sonunu kaçırdı"
+
+
+@pytest.mark.parametrize("hedef", ["root", "paket"])
+def test_her_rclone_subprocess_cagrisi_timeout_tasir(hedef):
+    """sync_motor.py'deki HER rclone subprocess.run çağrısı timeout taşımalı.
+
+    Kırmızıysa: sınırsız bir rclone çağrısı eklenmiş demektir → GDrive
+    throttle'da asılma, cron SIGTERM, boş log ve tutulu kilit geri gelir.
+    """
+    kok = Path(sm.__file__).resolve().parent.parent          # depo kökü
+    dosya = kok / "sync_motor.py" if hedef == "root" else Path(sm.__file__)
+    kaynak = dosya.read_text(encoding="utf-8")
+    sinirsiz = []
+    for satir, blok in _rclone_subprocess_bloklari(kaynak):
+        if "rclone" not in blok:
+            continue
+        if "timeout=" not in blok:
+            sinirsiz.append(f"L{satir}: {' '.join(blok.split())[:100]}")
+    assert not sinirsiz, (
+        "timeout'suz rclone çağrısı (asılmada kilit + tanısız SIGTERM):\n"
+        + "\n".join(sinirsiz)
+    )
+
+
+def test_rollback_indirmesi_timeout_ve_fail_closed():
+    """cmd_rollback indirmesi: 180s sınırı + TimeoutExpired'da rc=1, yazma YOK.
+
+    Fail-closed kanıtı: zaman aşımında return 1 — geri alma/uygulama aşamasına
+    geçilmez; hedef dizine hiçbir dosya yazılmaz (geçici dizindeki kısmi indirme
+    finally rmtree ile silinir).
+    """
+    src = Path(sm.__file__).read_text(encoding="utf-8")
+    bloklar = _rclone_subprocess_bloklari(src)
+    hedef = [b for _, b in bloklar if 'copyto", f"{hub}/{node}/{version}"' in b]
+    assert hedef, "cmd_rollback indirme çağrısı bulunamadı (yeniden adlandırıldı?)"
+    assert "timeout=180" in hedef[0], "cmd_rollback indirmesi sınırsız"
+    assert "TimeoutExpired" in src.split("def cmd_rollback")[1][:4000], (
+        "cmd_rollback zaman aşımını yakalamıyor (tanısız çökme)"
+    )
+
+
+# ─── YAZMAYA RETRY YASAĞI — YAPISAL (AST) KAPI (14 Eyl 2026) ────────────
+# Denetim bulgusu (gpt-5.6-sol): cmd_backup upload'ı `for _attempt in (1, 2)`
+# döngüsüyle YAZMA (copyto) çağrısını tekrar deniyordu → "yazmaya asla retry"
+# ilkesinin ihlali. Metin taraması bunu yakalamaz (çağrı yine bir kez geçer);
+# yapı gerekir. Bu kapı, YAZMA alt-komutlu bir subprocess.run çağrısının
+# deneme/while döngüsü içinde bulunmasını REDDEDER.
+
+def _yazma_retry_donguleri(kaynak: str):
+    """Deneme döngüsü (literal aralık/while) içindeki rclone YAZMA çağrıları."""
+    import ast
+
+    agac = ast.parse(kaynak)
+    yazma = set(sm._RETRY_WRITE_TOKENS)
+    bulgular = []
+
+    def _yazma_cagrilari(dugumler):
+        adlar = []
+        for d in dugumler:
+            for n in ast.walk(d):
+                if not isinstance(n, ast.Call):
+                    continue
+                f = n.func
+                if not (isinstance(f, ast.Attribute) and f.attr == "run"):
+                    continue
+                for a in n.args:
+                    if not isinstance(a, ast.List):
+                        continue
+                    for el in a.elts:
+                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                            v = el.value.strip("\"'")
+                            if v in yazma:
+                                adlar.append(v)
+        return adlar
+
+    for fn in ast.walk(agac):
+        if not isinstance(fn, (ast.For, ast.While)):
+            continue
+        if isinstance(fn, ast.For):
+            it = fn.iter
+            literal = (isinstance(it, (ast.Tuple, ast.List))
+                       and all(isinstance(e, ast.Constant) for e in it.elts))
+            aralik = (isinstance(it, ast.Call)
+                      and getattr(it.func, "id", "") == "range")
+            if not (literal or aralik):
+                continue                      # 'for n in nodes:' gibi normal döngü
+        adlar = _yazma_cagrilari(fn.body)
+        if adlar:
+            bulgular.append(f"L{fn.lineno}: deneme döngüsü içinde YAZMA {adlar}")
+    return bulgular
+
+
+def test_yazma_cagrisi_retry_dongusunde_degil():
+    """YAZMA (copyto/copy/sync...) çağrısı deneme döngüsü içinde olamaz.
+
+    Retry yalnız idempotent OKUMALARDA ve RUN seviyesindedir (node atlanır,
+    sonraki koşu telafi eder). Kırmızıysa: uzak hedefin durumu bilinmeden
+    ikinci yazma riski geri gelmiş demektir.
+    """
+    kok = Path(sm.__file__).resolve().parent.parent / "sync_motor.py"
+    for kaynak, ad in ((Path(sm.__file__).read_text(encoding="utf-8"), "paket"),
+                       (kok.read_text(encoding="utf-8"), "kök")):
+        bulgular = _yazma_retry_donguleri(kaynak)
+        assert not bulgular, f"{ad} kopyada yazmaya retry: {bulgular}"
+
+
+def test_yazma_retry_dedektoru_eski_ihlali_yakalar():
+    """Dedektör kanıtı: kaldırılan 2-denemeli upload döngüsü YAKALANIR."""
+    eski = (
+        "def f(cfg, nodes):\n"
+        "    for n in nodes:\n"
+        "        r = None\n"
+        "        for _attempt in (1, 2):\n"
+        "            try:\n"
+        "                r = subprocess.run([\"rclone\", \"copyto\", t, dest],\n"
+        "                                   capture_output=True, timeout=180)\n"
+        "                break\n"
+        "            except subprocess.TimeoutExpired:\n"
+        "                r = None\n"
+        "        if r is None:\n"
+        "            continue\n"
+    )
+    bulgular = _yazma_retry_donguleri(eski)
+    assert bulgular, "dedektör eski yazma-retry ihlalini KAÇIRDI"
+    assert "copyto" in bulgular[0]
+
+
+def test_yazma_retry_dedektoru_normal_node_dongusune_takilmaz():
+    """Yanlış pozitif kapısı: 'for n in nodes:' içindeki tek yazma normaldir."""
+    normal = (
+        "def f(cfg, nodes):\n"
+        "    for n in nodes:\n"
+        "        try:\n"
+        "            r = subprocess.run([\"rclone\", \"copyto\", t, dest], timeout=180)\n"
+        "        except subprocess.TimeoutExpired:\n"
+        "            continue\n"
+    )
+    assert _yazma_retry_donguleri(normal) == []
+
+

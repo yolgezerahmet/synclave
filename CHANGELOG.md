@@ -1,5 +1,46 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.3] — 2026-09-14 (sınırsız rclone çağrısı kapatıldı + yazmaya-retry ihlali geri alındı)
+
+- **fix: ikiz depo parite kapısı KIRMIZIYDI — public repo, twin'in iki düzeltmesini
+  taşımıyordu.** Ölçüm (tick başı): `395 test → 1 failed / 390 passed`
+  (`test_kopya_parite.py::test_ikiz_depo_paritesi`, "sync_motor.py: paket ve kök
+  kopyaları ayrıştı"). Sapma: kök/paket 3929 satır, twin (`cumulus-sync-motor`,
+  `c990413c`+`79d13f02`) 3952 satır, İKİSİ de `2.7.2` beyan ediyordu → kapı
+  doğru şekilde kırmızıydı. Taşınan gerçek düzeltme: `cmd_backup` GDrive upload'ı
+  **SINIRSIZDI** → throttle'da asılma, cron 3600s SIGTERM, stdout blok-tamponlu
+  olduğu için BOŞ log ve saatlerce tutulan kilit.
+- **fix: `cmd_rollback` indirmesi de SINIRSIZDI (aynı sınıfın ikinci örneği).**
+  Dengeli-parantez taraması 12 `subprocess.run` çağrısının TAMAMINI denetledi;
+  yalnız bu çağrıda `timeout` yoktu. 180s sınırı + `TimeoutExpired` yakalama
+  eklendi; zaman aşımı **fail-closed**: `rc=1`, geri alma/uygulama aşamasına
+  geçilmez, hedef dizine hiçbir dosya yazılmaz (kısmi indirme `finally rmtree`).
+- **fix: `cmd_backup` upload'ı YAZMAYA RETRY yapıyordu (denetim bulgusu,
+  gpt-5.6-sol).** `for _attempt in (1, 2)` döngüsü `copyto`'yu (uzak hedefe YAZMA)
+  tekrar deniyordu — "yazmaya asla retry" ilkesinin ihlali; timeout uzak nesnenin
+  durumunu kanıtlamadığı için ikinci yazma belirsiz durumu tekrarlıyordu. Döngü
+  kaldırıldı: **tek deneme + 180s**. Retry artık RUN seviyesinde (node TIMEOUT
+  işaretlenir, sonraki 90 dk koşusu telafi eder) ve uzak nesne için "yazıldı"
+  iddiası üretilmez.
+- **fix: `synclave_kod/` (node paketi) bayat kopya.** `h2_dogrula.py` bu flat
+  dizinden import ediyor; `sync_motor.py` kanonikten 36 satır gerideydi
+  (`test_node_paketi_parite.py`). Kanonikle hizalandı.
+- **Kapılar (3 yeni, 395 → 398 test):**
+  - `test_her_rclone_subprocess_cagrisi_timeout_tasir` — sync_motor'daki HER
+    rclone `subprocess.run` çağrısı `timeout` taşımalı (dengeli-parantez taraması;
+    düz regex `os.path.basename(...)` iç içe parantezinde kesip timeout'suz
+    çağrıyı "timeout var" sanıyordu — dedektörün kendisi de test edilir).
+  - `test_yazma_cagrisi_retry_dongusunde_degil` — **AST kapısı**: YAZMA alt-komutlu
+    (`copyto/copy/sync/…`) bir çağrı deneme döngüsü (`for x in (1,2)` / `range` /
+    `while`) içinde bulunamaz. Metin taraması bunu yakalayamaz; yapı gerekir.
+    Dedektör, kaldırılan ihlali yakaladığı ve `for n in nodes:` gibi normal
+    döngüye takılmadığı için ayrıca iki testle kilitlendi.
+  - `test_rollback_indirmesi_timeout_ve_fail_closed` — indirme sınırı + tanı.
+- **Kanıt:** public `398 passed` (exit 0), twin `390 passed / 8 skipped` (exit 0),
+  5 kopya (kök, `synclave/`, `synclave_kod/`, twin kök, twin `synclave/`) ve test
+  dosyaları byte-parite; davranışsal kanıt: `TimeoutExpired` → `rc=1` + hedef
+  dizine 0 dosya.
+
 ## [2.7.2] — 2026-09-14 (build kilidi: "kilit dolu" atlaması gerçekten çalışır hale getirildi)
 
 - **fix: `verify_build` build kilidi port edildi + zaman aşımı yarışı kapatıldı.**
