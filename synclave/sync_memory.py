@@ -257,6 +257,28 @@ AUDIT_REQUIRED = ("event_id", "timestamp_utc", "node_id", "agent_id",
                   "new_sha256", "event_type", "result")
 
 
+def audit_log_path(audit_dir: str) -> str:
+    """Bugünkü audit log dosyasının TAM yolu (günlük rotasyon: YYYY-MM-DD.jsonl).
+
+    Neden ayrı yardımcı (14 Eyl 2026 — iki kırmızı kapı):
+    `append_audit_event` log dosyasının YANINA kalıcı bir kilit dosyası bırakır
+    (`<tarih>.jsonl.lock`, 29 Ağu atomik zincir düzeltmesi). Tüketiciler log
+    dosyasını `os.listdir(audit_dir)[0]` ile keşfederse liste sırası dosya
+    sistemine bağlı olduğundan bazen BOŞ kilit dosyası seçilir:
+    (a) `readlines()` boş → IndexError, (b) `_audit_last_hash` boş dosyada
+    "0"*64 döndürür → zincir doğru olsa da FAIL. Kapı KARARSIZDI (aynı kod bir
+    makinede yeşil, diğerinde kırmızı — CI'da rastgele kırmızı). Yol artık tek
+    kaynaktan alınır, dizin listeleme YOKTUR. Ayrıca aynı ifade iki fonksiyonda
+    kopyalanmıştı (sapma riski) — tek kaynak.
+
+    Dizin sözleşmesi: `<audit_dir>/<YYYY-MM-DD>.jsonl` (log) + aynı günün
+    `<YYYY-MM-DD>.jsonl.lock` (kilit, BOŞ). Audit dizinini tarayan tüketiciler
+    `.lock` dosyasını log sanmamalıdır — yol buradan alınır.
+    """
+    return os.path.join(audit_dir,
+                        datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".jsonl")
+
+
 def append_audit_event(audit_dir: str, event: dict) -> str:
     """Audit olayı ekle — hash-chain (previous_event_hash + event_hash).
 
@@ -266,7 +288,7 @@ def append_audit_event(audit_dir: str, event: dict) -> str:
     LOCK dosyası üzerinde (fcntl.flock / msvcrt.locking) atomik yapılır.
     """
     os.makedirs(audit_dir, exist_ok=True)
-    log_path = os.path.join(audit_dir, datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".jsonl")
+    log_path = audit_log_path(audit_dir)
     event.setdefault("event_id", str(uuid.uuid4()))
     event.setdefault("timestamp_utc", datetime.now(timezone.utc).isoformat() + "Z")
     event.setdefault("operation_id", str(uuid.uuid4()))
@@ -357,9 +379,19 @@ def _audit_append_line(log_path: str, event: dict) -> None:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def verify_audit_chain(audit_dir: str) -> dict:
-    """Hash zinciri doğrula — log satırı değiştirildiyse zincir kırılır."""
-    log_path = os.path.join(audit_dir, datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".jsonl")
+def verify_audit_chain(audit_dir: str, log_path: str = None) -> dict:
+    """Hash zinciri doğrula — log satırı değiştirildiyse zincir kırılır.
+
+    `log_path`: hedef dosyayı AÇIKÇA verir (varsayılan: bugünkü log).
+    Neden gerekli (14 Eyl 2026, gpt-5.6-sol kritik denetimi — gün devri bulgusu):
+    yazma ve doğrulama AYRI çağrılar olduğundan UTC gece yarısını aşan bir
+    "yaz + doğrula" zincirinde varsayılan yol ERTESİ günün dosyasını seçer ve
+    doğrulama zincir sağlam olsa da "log yok" ile kırmızı görünür. Çağıran,
+    yazdığı dosyanın yolunu (`audit_log_path`) bir kez üretip buraya geçirirse
+    doğrulama doğru dosyada yapılır. Varsayılan davranış DEĞİŞMEZ (bugün).
+    """
+    if log_path is None:
+        log_path = audit_log_path(audit_dir)
     if not os.path.exists(log_path):
         return {"ok": False, "error": "log yok"}
     prev = "0" * 64

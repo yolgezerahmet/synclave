@@ -197,7 +197,11 @@ if h1 == h2 or len(h1) != 64:
     fail("hash beklenmiyor")
 ok(f"audit zinciri bozulmadı (h1={h1[:8]}… h2={h2[:8]}…)")
 # helper'lar doğru çalışıyor
-if smem._audit_last_hash(ad + "/" + os.listdir(ad)[0]) != h2:
+# 14 Eyl 2026: audit dizininde log ile birlikte `<tarih>.jsonl.lock` de durur;
+# `os.listdir(ad)[0]` bazen BOŞ kilit dosyasını seçiyordu → helper orada "0"*64
+# döndürüp yanlış FAIL üretiyordu (kapı kararsızdı). Yol üretim yardımcısından
+# alınır: dizin listeleme YOK.
+if smem._audit_last_hash(smem.audit_log_path(ad)) != h2:
     fail("_audit_last_hash son hash'i döndürmüyor")
 ok("_audit_last_hash son hash doğru")
 

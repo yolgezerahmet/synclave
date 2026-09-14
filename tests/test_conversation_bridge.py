@@ -31,6 +31,21 @@ class Base(unittest.TestCase):
         c.execute("INSERT INTO sessions VALUES('s2','cli','root','','CLI')")
         self.c = c
         self.ident = AI.AgentIdentity.load_or_create()
+        # 14 Eyl 2026: kilit yolu SABİTTİR (~/.hermes/state/bridge.lock) ve test
+        # ortam değişkenleriyle taşınmaz. Canlı köprü cron'u (15 dk) tam o sırada
+        # koşarsa main() "başka bir köprü çalışıyor" deyip rc=0 ile ATLAR; satır
+        # assert'leri IndexError/AssertionError verir → suite RASTGELE kırmızı
+        # (ölçüldü: tam suite 4 failed ↔ tek başına 4 passed). Test kendi geçici
+        # kilidine yönlendirilir: üretim kilidiyle YARIŞMAZ, kapı deterministik.
+        self._lock_orig = CB._LOCK_FILE
+        CB._LOCK_FILE = str(self.tmp / "bridge.lock")
+        # addCleanup: setUp bu satırdan SONRA patlarsa unittest tearDown'ı
+        # ÇAĞIRMAZ ve modül globali geçici değerde kalırdı (gpt-5.6-sol denetimi)
+        # — geri yükleme addCleanup ile garanti altına alınır.
+        self.addCleanup(self._kilit_geri_yukle)
+
+    def _kilit_geri_yukle(self):
+        CB._LOCK_FILE = self._lock_orig
 
     def tearDown(self):
         for k in ("AGENT_IDENTITY_DIR", "HERMES_STATE_DB", "BRIDGE_WATERMARK"):

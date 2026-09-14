@@ -1,5 +1,40 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.1] — 2026-09-14 (audit log yolu tek kaynak + KARARSIZ kapı kapatıldı)
+
+- **fix: audit log yolu artık tek kaynaktan** (`sync_memory.audit_log_path`).
+  `append_audit_event` log dosyasının YANINA kalıcı `<tarih>.jsonl.lock`
+  bırakıyor (29 Ağu atomik "oku+ekle" düzeltmesi). Kökteki iki self-check betiği
+  log'u `os.listdir(audit_dir)[0]` ile keşfediyordu; liste sırası dosya
+  sistemine bağlı olduğundan bazen **BOŞ kilit dosyası** seçiliyordu:
+  `test_sync_memory.py` → `lines[0]` **IndexError**, `test_memory_fixes.py` →
+  `_audit_last_hash` boş dosyada `"0"*64` → **yanlış FAIL**.
+  Sonuç: kapı KARARSIZDI — retry/backoff (v2.6.x) ve Windows (v2.6.0) işleri
+  yeşilken `pytest tests/` rastgele kırmızıya düşüyordu (aynı kod bir makinede
+  yeşil, diğerinde kırmızı). Mükerrer tarihli-yol ifadesi iki fonksiyondan
+  (append + verify) yardımcıya taşındı: tek kaynak, dizin listeleme YOK.
+- **Kapı: `tests/test_audit_log_yolu.py`** — (1) yardımcı `.lock` döndüremez,
+  (2) kök neden kanıtı: kilit kardeşi oluşur ve BOŞTUR, (3) eski keşif mantığı
+  en kötü sırada deterministik olarak YANLIŞ dosyayı seçer (dosya sistemi
+  sırasına güvenilmez), (4) append/verify aynı yolu kullanır, kilit kardeşi
+  zinciri bozmaz, (5) zincir bozulması hâlâ yakalanır, (6) betikler listelemeye
+  dayalı keşfe geri dönemez (AST denetimi — yorumdaki örnek desen yanlış kırmızı
+  üretmez).
+- **fix: köprü testleri üretim kilidiyle yarışmıyor (İKİNCİ kararsız kapı).**
+  `conversation_bridge` kilit yolu sabittir (`~/.hermes/state/bridge.lock`) ve
+  test ortam değişkenleriyle taşınmaz; canlı köprü cron'u (15 dk) tam koşu
+  anında kilitliyse `main()` "başka bir köprü çalışıyor" deyip rc=0 ile atlıyor,
+  ardından satır assert'leri IndexError/AssertionError veriyordu (ölçüm: tam
+  suite 4 failed ↔ tek başına 4 passed). Test kendi geçici kilidine yönlendirildi
+  — kilit DIŞARIDAN tutulurken de 4/4 PASS.
+- **fix: gün devri (UTC gece yarısı) doğrulaması** — `verify_audit_chain` artık
+  isteğe bağlı `log_path` alır (gpt-5.6-sol kritik denetimi bulgusu): yazma ve
+  doğrulama AYRI çağrılar olduğundan gece yarısını aşan "yaz + doğrula"
+  zincirinde varsayılan yol ertesi günün dosyasını seçiyor ve SAĞLAM zincir
+  "log yok" ile kırmızı görünüyordu. Çağıran `audit_log_path` ile ürettiği yolu
+  geçirir; varsayılan davranış değişmez (geriye uyumlu). Regresyon testi:
+  `test_gun_devri_verify_hedefi_kaymaz`.
+
 ## [2.7.0] — 2026-09-14 (akıllı hafıza birleştirme + ilerleme yayını)
 
 - **feat: MEMORY.md / USER.md çakışma kopyası yerine BİRLEŞİR (append).** İki

@@ -86,7 +86,10 @@ assert ver["ok"] and ver["events"] == 2
 ok("audit hash-chain (2 olay)")
 
 # zincir bozulma tespiti
-logp = os.path.join(aud, os.listdir(aud)[0])
+# 14 Eyl 2026: dizin listeleme yerine üretim yardımcısı. Audit dizininde
+# `<tarih>.jsonl.lock` kardeşi vardır; `os.listdir(aud)[0]` bazen onu seçiyordu
+# (boş dosya → readlines() boş → IndexError; kapı kararsızdı).
+logp = sm.audit_log_path(aud)
 with open(logp) as f:
     lines = f.readlines()
 lines[0] = lines[0].replace('"new_sha256": "1"*64', '"new_sha256": "9"*64')
