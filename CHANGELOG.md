@@ -1,5 +1,44 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.4] — 2026-09-14 (Windows kurulum dokümanı: pip tuzağı + restic uç noktası)
+
+- **fix: README Windows bölümü kullanıcıyı YANLIŞ kuruluma yönlendiriyordu.**
+  `pip install rclone` ve `pip install restic` satırları duruyordu. İkisi de
+  **Go binary**'sidir; pip resmi dağıtım yolu değildir. Canlı ölçüm
+  (pypi.org/pypi): `rclone` → "A robust, typed Python wrapper for the rclone CLI"
+  (yani rclone CLI'sini YİNE ister); `restic` → "A modern, type-safe Python
+  library for building robust REST API clients" (yedek motoruyla ALAKASIZ).
+  Dokümanı izleyen Windows kullanıcısı "kurulum tamam" sanıp runtime'da
+  `rclone: command not found` alıyordu. Doğru yol yazıldı:
+  `winget install Rclone.Rclone` / `winget install restic.restic`
+  (winget-pkgs manifestleri canlı doğrulandı: `manifests/r/Rclone/Rclone`,
+  `manifests/r/restic/restic`) + resmi binary alternatifi + `rclone version` /
+  `restic version` doğrulaması.
+- **fix: Syncthing kimliği kanonik yazıma çevrildi**
+  (`syncthing.syncthing` → `Syncthing.Syncthing`; winget-pkgs yolu
+  `s/Syncthing/Syncthing`).
+- **fix: restic'in BAĞLANDIĞI uç nokta hiçbir yerde yazılı değildi**
+  (OceanAPI gpt-5.6-sol denetim bulgusu). README `rclone serve restic ...`
+  komutunu veriyor, ama motorun bağlandığı adresi (kod: `RESTIC_REPO_URL`
+  varsayılanı `rest:http://127.0.0.1:8443/`) ve `RESTIC_REPO_URL` ile üzerine
+  yazma yolunu yazmıyordu → farklı addr/port/uzak yolda sunan kullanıcı sessizce
+  bağlanamıyordu.
+- **fix: `setx` kapsamı belirtildi.** `setx` yalnızca SONRADAN açılan süreçlere
+  işler; görev `SYSTEM`/başka kullanıcı bağlamında çalışıyorsa kullanıcı ortam
+  değişkeni GÖRÜNMEZ → token görev tanımında da verilmeli (yoksa mesh adımı
+  sessizce yetkisiz kalır).
+- **Kapı: yeni test dosyası `tests/test_readme_kurulum.py` (398 → 407 test).**
+  - `pip install rclone|restic` bir TALİMAT olarak yasak; UYARI bağlamındaki
+    ("pip değil", "KURMAZ") anmalar serbest — tuzağı adıyla göstermek okuyucuya
+    değer katar. Kapının kendisi pozitif/negatif kontrolle test edilir (ölü kapı
+    koruması: çıplak talimat satırı yakalanmalı, uyarı satırı serbest kalmalı).
+  - Windows bölümü winget kimliklerini + `version` doğrulamasını + uçtan uca
+    adımları (rclone config / serve restic / A2A_TOKEN / ilk senkron) içerir.
+  - **Sapma kapısı:** dokümandaki restic uç noktası = `sync_motor.py` kaynak
+    literali (runtime değeri DEĞİL — test ortamında `RESTIC_REPO_URL` tanımlıysa
+    yanlış kırmızı verirdi).
+  - Ölçüm (tick sonu): `407 passed` (5.15s), RC=0.
+
 ## [2.7.3] — 2026-09-14 (sınırsız rclone çağrısı kapatıldı + yazmaya-retry ihlali geri alındı)
 
 - **fix: ikiz depo parite kapısı KIRMIZIYDI — public repo, twin'in iki düzeltmesini

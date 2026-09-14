@@ -55,7 +55,8 @@ rclone lsd gdrive:            # erişim doğrulaması
 
 ## 3) restic (yedek motoru)
 
-restic de Go programıdır; binary kur:
+restic de Go programıdır; binary kur — **pip değil**: PyPI'daki `restic` paketi
+alakasız bir REST-istemci kütüphanesidir (`pip install restic` yedek motorunu kurmaz).
 
 ```powershell
 winget search restic          # çıkan ID ile: winget install <ID>
@@ -70,12 +71,20 @@ GDrive object store'u yerel uç nokta olarak sun (arka plan):
 rclone serve restic gdrive:restic-backup --addr 127.0.0.1:8443
 ```
 
+Motor bu uç noktaya varsayılan olarak `rest:http://127.0.0.1:8443/` ile bağlanır
+(`RESTIC_REPOSITORY` olarak verilir). Sunucuyu başka addr/port veya başka uzak
+yolda açarsanız `RESTIC_REPO_URL` ile üzerine yazın:
+
+```powershell
+setx RESTIC_REPO_URL "rest:http://127.0.0.1:9000/my-repo/"
+```
+
 Oturum açılışında başlatmak için Task Scheduler (`schtasks /create ...`) veya NSSM.
 
 ## 4) Syncthing (P2P dosya kanalı — opsiyonel, önerilir)
 
 ```powershell
-winget install syncthing.syncthing
+winget install Syncthing.Syncthing
 # GUI: http://127.0.0.1:8384 → H1/H3 cihaz ID'lerini eşleştir (22000/tcp)
 ```
 
@@ -87,6 +96,11 @@ setx A2A_TOKEN "<ortak-token>"
 ```
 
 `cmd_mesh`, token'ı ortamdan bulamazsa `~/.hermes/.env` içindeki `A2A_TOKEN=` satırına bakar.
+
+Uyarı: `setx` yalnızca SONRADAN açılan süreçlere işler (mevcut terminal görmez).
+Görev `SYSTEM` veya başka bir kullanıcı bağlamında çalışıyorsa kullanıcı ortam
+değişkeni GÖRÜNMEZ — token'ı görev tanımında (veya görev kullanıcısının ortamında)
+ayrıca verin, yoksa mesh adımı sessizce yetkisiz kalır.
 
 ## 6) İlk çalıştırma
 

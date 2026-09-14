@@ -143,11 +143,18 @@ python3 sync_motor.py mesh status       # tüm node'ların A2A durumu
 # 1) Python 3.10+ (python.org — PATH'e ekle) + git
 python --version
 
-# 2) Paket + CLI kur
+# 2) Python paketi + CLI kur (synclave / synclave-a2a / synclave-worker)
 pip install synclave
-pip install rclone                # veya winget install Rclone.Rclone
-pip install restic                # veya restic.net binary → PATH'e ekle
 pip install uvicorn fastapi       # A2A server için (opsiyonel)
+
+# 2b) rclone + restic — ikisi de Go BINARY'sidir, pip ile KURULMAZ
+#     PyPI'daki "rclone" bir Python wrapper'dır (yine rclone CLI'sini ister);
+#     PyPI'daki "restic" ise tamamen ALAKASIZ bir REST istemcisidir — yedek
+#     aracı DEĞİLDİR. Yanlış kurulum sessizce çalışmayan bir motor bırakır.
+winget install Rclone.Rclone      # veya https://rclone.org/downloads/ → PATH
+winget install restic.restic      # veya https://restic.net/ → windows_amd64.zip → PATH
+rclone version                    # doğrulama (rc=0 beklenir)
+restic version
 
 # 3) rclone — GDrive remote (tek seferlik OAuth)
 rclone config
@@ -157,14 +164,19 @@ rclone config
 
 # 4) restic — GDrive object store'u mount et (arka plan servisi)
 rclone serve restic gdrive:restic-backup --addr 127.0.0.1:8443
+#    Motor varsayılan olarak `rest:http://127.0.0.1:8443/` adresine bağlanır
+#    (RESTIC_REPOSITORY). Başka addr/port veya uzak yol için üzerine yaz:
+#      setx RESTIC_REPO_URL "rest:http://127.0.0.1:9000/my-repo/"
 #    Windows: `schtasks /create` veya NSSM ile oturum açılışında başlat
 
 # 5) Syncthing — P2P dosya kanalı (opsiyonel ama önerilir)
-winget install syncthing.syncthing
+winget install Syncthing.Syncthing    # kanonik kimlik (winget-pkgs: s/Syncthing/Syncthing)
 #    GUI 127.0.0.1:8384 → H1/H3 cihazları eşleştir (device ID'ler)
 
 # 6) A2A token — H1/H3 ile aynı ortak token'ı .env/ortam değişkenine yaz
 setx A2A_TOKEN "test-a2a-mesh-2026"     # kendi ortak değerinizle değiştirin
+#    `setx` yalnızca YENİ terminallere işler; görev SYSTEM/başka kullanıcı
+#    bağlamında çalışıyorsa token'ı görev tanımında da verin (yoksa görünmez)
 
 # 7) İlk senkron
 python -m synclave.sync_motor init    # config üret
@@ -183,6 +195,12 @@ Windows notları:
   geçici dizinler `_platform_temp_dir()` ile platformdan türetilir (sabit `/` yok).
 - A2A istemcisi (`a2a_cli.py`) yalnızca `urllib` kullanır — ek bağımlılık gerekmez.
 - A2A server `uvicorn` bulunamazsa net hata mesajı basar ve çıkar (traceback değil).
+- `rclone` ve `restic` **Go binary**leridir; kurulum **pip değil**. PyPI'daki
+  `rclone` bir wrapper'dır (yine CLI ister), PyPI'daki `restic` ise alakasız bir
+  REST istemcisidir — `pip install restic` yedek motorunu KURMAZ. Doğru yol:
+  `winget install Rclone.Rclone` / `winget install restic.restic` veya resmi
+  binary → PATH (`rclone version`, `restic version` ile doğrula).
+  Kapı: `tests/test_readme_kurulum.py`.
 - Uzaktan kurulum için hazır betikler: `remote_hermes_setup.ps1` (SSH/Tailscale).
 - Adım adım tam prosedür (rclone OAuth, restic, Syncthing, A2A token, Task Scheduler):
   [`docs/windows.md`](docs/windows.md).

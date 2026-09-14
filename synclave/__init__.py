@@ -2,7 +2,7 @@
 
 Eski ad: hermes-sync (v2.3.1) → rebrand: synclave (v1.0.0).
 """
-__version__ = "2.7.3"
+__version__ = "2.7.4"
 
 from . import (
     sync_motor,
