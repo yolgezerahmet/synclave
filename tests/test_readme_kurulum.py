@@ -52,10 +52,12 @@ def pip_yasak_satirlari(icerik: str) -> list:
 
 
 def _windows_bolumu() -> str:
-    """README'den 'Windows Kurulum' başlığından sonraki ilk '###' bölümü."""
+    """README'den Windows kurulum bölümü (iki başlık dili de kabul — twin README'de
+    `## Windows`, public README'de `### Windows Kurulum`)."""
     metin = README.read_text(encoding="utf-8")
-    m = re.search(r"^### Windows Kurulum.*?(?=^### |\Z)", metin, re.S | re.M)
-    assert m, "README'de '### Windows Kurulum' bölümü yok"
+    m = re.search(r"^#{2,3}\s*Windows(?: Kurulum)?[^\n]*\n.*?(?=^#{2,3}\s|\Z)",
+                  metin, re.S | re.M)
+    assert m, "README'de Windows kurulum bölümü yok"
     return m.group(0)
 
 
