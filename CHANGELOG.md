@@ -38,6 +38,30 @@
     literali (runtime değeri DEĞİL — test ortamında `RESTIC_REPO_URL` tanımlıysa
     yanlış kırmızı verirdi).
   - Ölçüm (tick sonu): `407 passed` (5.15s), RC=0.
+- **fix: twin'in (private) "retention açlığı" düzeltmeleri public'e taşındı —
+  parite yeşil.** Tick ORTASINDA twin `f7edde12` ile iki gerçek düzeltme commit'ledi
+  ve sürümü 2.7.4'e çekti; sürümler eşitlenince parite kapısı doğru şekilde KIRMIZI
+  oldu (`sync_motor.py`/`node_agent.py` kök kopyaları ayrıştı). Taşınanlar:
+  - `_restic`: `subprocess.run` zaman aşımında `TimeoutExpired` YAKALANIR (önceden
+    traceback ile çöküyordu → rc/rapor/log yok = sessiz ölüm) → artık fail-soft
+    `(-1, "TIMEOUT Ns <çıktı kuyruğu>")`.
+  - retention: yetim kilit süpürme (`restic unlock`, **`--remove-all` DEĞİL** →
+    uzak makinenin CANLI kilidi korunur), `--retry-lock` 30m → **2m**
+    (`SYNC_RETENTION_RETRY_LOCK`), forget'e SINIRLI timeout
+    (`SYNC_RETENTION_TIMEOUT`, varsayılan 900s) + süre ölçümü/log,
+    `SYNC_RETENTION_DRY_RUN`. Kanıt: 667 snapshot birikimi, 17:54:56 yetim kilit
+    (pid 532056 ölü), `restic unlock` tek başına 54s, node fazı ~1706s.
+  - `node_agent`: `BUTCE_BACKUP_S` 3000s denemesi GERİ ALINDI (1800s) — toplam adım
+    bütçesi `DIS_KAPI_S=3600`'ü aşamaz; `tests/test_node_agent_butce.py` bunu
+    yakaladı, gerekçe koda yorum olarak yazıldı (dış kapı artışı SAHİP KARARI).
+  - Ölçüm: kök/paket/node-paket `sync_motor.py` + `node_agent.py` kopyaları
+    byte-eşit (sha256 tek), parite kapısı yeşil.
+- **Kapı: yeni test dosyası `tests/test_restic_failsoft.py`** (taşınan davranışın
+  kanıtı — twin fix'i kendi testini getirmemişti): timeout fail-soft (istisna yok),
+  çıktı kuyruğunun mesaja girmesi, `timeout` değerinin `subprocess.run`'a geçmesi,
+  `--remove-all` KODDA yasak (yorum-anması serbest; kapı yorumları ayıklar),
+  `SYNC_RETENTION_*` env anahtarları + sınırlı forget timeout, eski `--retry-lock 30m`
+  regresyonu. Ölçüm (tick sonu): `413 passed`, RC=0.
 
 ## [2.7.3] — 2026-09-14 (sınırsız rclone çağrısı kapatıldı + yazmaya-retry ihlali geri alındı)
 

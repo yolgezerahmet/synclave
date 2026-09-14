@@ -95,6 +95,17 @@ DEFAULT_USER = "hahmet"
 DIS_KAPI_S = 3600
 BUTCE_SYNC_S = 900          # ölçülen: 'both' ~7 dk (6.7 dk) → 15 dk bol pay
 BUTCE_BACKUP_S = 1800       # restic/GDrive; aşılırsa RAPOR EDİLİR (sessiz ölüm yok)
+                            # 14 Eyl 2026 ÖLÇÜM (bütçe DEĞİŞTİRİLMEDİ — kontrat):
+                            # 14 node'un node-fazı toplamı ~1706s (GDrive REST
+                            # gecikmesi; 0 değişiklikte bile patent 1:38, her node
+                            # >=1:25) → 1800s bütçesinin ~%95'i node fazında bitiyor ve
+                            # retention SIGKILL ediliyor (rc=-1 TIMEOUT 1800s), repoda
+                            # yetim kilit kalıyordu (667 snapshot birikti).
+                            # 3000s denendi → tests/test_node_agent_butce.py
+                            # test_toplam_butce_diskapinin_altinda FAIL: toplam adım
+                            # bütçesi DIS_KAPI_S=3600'ü aşamaz. Bu yüzden değer
+                            # GERİ ALINDI; retention'ın sığması için DIS_KAPI_S +
+                            # dış cron timeout artışı SAHİP KARARI gerektirir.
 BUTCE_MEMORY_S = 240
 BUTCE_DIGER_S = 300         # status + tasks + state + hub raporu payı
 BUTCE_VARSAYILAN_S = 1800   # motor() varsayılanı — çağrı açık timeout vermezse

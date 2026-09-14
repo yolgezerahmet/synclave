@@ -2820,9 +2820,22 @@ def _restic(args, timeout=3600, cwd=None):
     if not rbin:
         print("    ❌ restic binary bulunamadı (PATH'te yok)")
         return None, "restic binary yok"
-    r = subprocess.run([rbin, *args], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace",
-                       timeout=timeout, env=env, cwd=cwd)
+    # 14 Eyl 2026 FIX (retention açlığı zinciri, kanıtlı): subprocess.run timeout'ta
+    # TimeoutExpired FIRLATIR -> cmd_backup traceback'le çöker (rc/rapor yok) VE
+    # SIGKILL edilen restic süreci kilidini BIRAKAMAZ -> repoda yetim kilit kalır
+    # (kanıt: 17:54:56 lock "exclusive":false, pid 532056 ölü; `restic unlock`
+    # "successfully removed 1 locks"). Artık fail-soft: (-1, "TIMEOUT ...").
+    try:
+        r = subprocess.run([rbin, *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           timeout=timeout, env=env, cwd=cwd)
+    except subprocess.TimeoutExpired as e:
+        _so, _se = e.stdout or b"", e.stderr or b""
+        if isinstance(_so, bytes):
+            _so = _so.decode("utf-8", "replace")
+        if isinstance(_se, bytes):
+            _se = _se.decode("utf-8", "replace")
+        return -1, f"TIMEOUT {timeout}s " + (_so + _se)[-300:]
     return r.returncode, r.stdout + r.stderr
 
 # ─── AKILLI KANAL SEÇİCİ (v2.1, 29 Ağu 2026) ───────────────────────────
@@ -3004,18 +3017,39 @@ def cmd_restic_backup(cfg, node=None, dry_run=False):
     ret_machine = os.environ.get("SYNC_RETENTION_MACHINE") or cfg.get("retention_machine", "")
     this_machine = cfg.get("machine", "")
     if not dry_run and (not ret_machine or this_machine == ret_machine):
-        # forget her koşu (hızlı — snapshot siler); prune SADECE 04:00-05:00 arası
-        # (--prune tüm repo'yu GC'ler, 55 snapshot'ta dakikalar sürer; her koşuda
-        # yapılırsa H1 backup cron'u uzar ve diğer sync'ler kilit yüzünden atlanır)
+        # 14 Eyl 2026 FIX — RETENTION AÇLIĞI (ölçülü kanıt):
+        #   • repoda 667 snapshot birikti (420 keep / 247 remove tasarımı); forget
+        #     aylardır HİÇ tamamlanmadı → her koşu 14 yeni snapshot yazıp birikiyor.
+        #   • Kök neden zinciri: (1) node fazı ~1706s ölçüldü, BUTCE_BACKUP_S=1800s'in
+        #     neredeyse tamamını yiyor; (2) süre dolunca subprocess SIGKILL → restic
+        #     kilidini bırakamaz; (3) repoda yetim kilit (exclusive=false, pid ölü)
+        #     kalır → sonraki forget eskiden --retry-lock 30m boyunca bekleyip yine
+        #     öldürülür (kısır döngü). Ölçüm: `restic unlock` tek başına 54s sürdü.
+        # Çözüm: (a) yetim kilidi süpür — `restic unlock` YALNIZCA bayat kilitleri
+        #     siler (--remove-all DEĞİL; uzak makinenin canlı kilidine dokunmaz),
+        #     (b) --retry-lock 30m → 2m (artık tüm bütçeyi yiyemez),
+        #     (c) forget'e SINIRLI timeout + süre ölçümü (sessiz ölüm yok).
+        retry_lock = os.environ.get("SYNC_RETENTION_RETRY_LOCK", "2m")
+        ret_timeout = int(os.environ.get("SYNC_RETENTION_TIMEOUT", "900"))
+        _t0 = time.monotonic()
+        if os.environ.get("SYNC_RETENTION_UNLOCK", "1") == "1":
+            urc, uout = _restic(["unlock"], timeout=180)
+            if urc == 0 and "removed" in (uout or ""):
+                print(f"    🔓 yetim kilit: {(uout or '').strip().splitlines()[-1]}")
         args = ["forget", "--keep-daily", "7", "--keep-weekly", "4",
-                # --retry-lock 30m: H2 (Windows) paralel backup sırasında kilidi
-                # tutuyor; 5m yetmiyordu (13-14 Eyl kanıtı: iki kez başarısız).
-                "--keep-monthly", "6", "--retry-lock", "30m"]
+                "--keep-monthly", "6", "--retry-lock", retry_lock]
+        if os.environ.get("SYNC_RETENTION_DRY_RUN", "") == "1":
+            args += ["--dry-run"]
         _h = time.localtime().tm_hour
         if _h in (4,):
             args += ["--prune"]
-        rc, out = _restic(args)
-        print(f"    🧹 retention: {'OK' if rc == 0 else out.strip()[-150:]}" + ("" if "--prune" in args else " (prune 04:00'de)"))
+        rc, out = _restic(args, timeout=ret_timeout)
+        _dt = time.monotonic() - _t0
+        _dur = f"{_dt:.0f}s" + ("" if "--prune" in args else " (prune 04:00'de)")
+        if rc == 0:
+            print(f"    🧹 retention: OK ({_dur})")
+        else:
+            print(f"    🧹 retention: BAŞARISIZ rc={rc} ({_dur}) — {str(out).strip()[-150:]}")
     elif not dry_run:
         print(f"    🧹 retention: atlandı (bu makine yedekliyor, prune {ret_machine} yapar)")
 
