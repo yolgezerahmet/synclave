@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.1"
+__version__ = "2.7.2"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -1866,13 +1866,65 @@ def gdrive_pull_latest(cfg, node):
         return False
 
 
+# Paylaşılan build kilidi (14 Eyl 2026; v2.7.2'de zaman aşımı yarışı kapatıldı).
+# NEDEN: 4 cron işçisi (cumulus-autonomous-dev, cumulus-tdd-deepening,
+# cumulus-z1z4-spektrum-antijam, cumulus-faz0-otonom-kanban) + bu sync motoru
+# AYNI worktree'yi paylaşır. cumulus_make_locked.sh build/test'i flock altında
+# serileştirir; sync'in `make clean`i kilit DIŞINDA kalırsa çalışan bir
+# sanitizer koşusunun build/quality/host/* ikili dosyalarını siler →
+# "make: build/quality/host/<test>: No such file or directory / Error 127"
+# şeklinde SAHTE FAIL üretir. Kanıt: 14 Eyl 2026 09:10 koşusu (pid 210202
+# `make clean` + eşzamanlı flock'lu sanitizer). Aynı kilit dosyası kullanılır.
+BUILD_LOCK = os.environ.get("CUMULUS_BUILD_LOCK", "/tmp/cumulus_build.lock")
+BUILD_LOCK_WAIT = os.environ.get("CUMULUS_LOCK_WAIT", "1800")
+# Subprocess zaman aşımı kilit beklemesinden BÜYÜK olmalı (v2.7.2). Eşit
+# olsaydı: flock tam bekleme sonunda 75 dönerken subprocess de aynı saniyede
+# kill edilir; run_cmd TimeoutExpired'da ("timeout", -1) döner, çıktıda "RC="
+# bulunmaz → build_rc=-1 → FAIL sanılır ve düzeltmenin engellediği SAHTE FAIL
+# geri gelir. Bu yüzden beklemenin üstüne build payı eklenir.
+BUILD_GRACE = os.environ.get("CUMULUS_BUILD_GRACE", "900")
+
+
+def _build_zaman_asimlari():
+    """(kilit_bekleme_s, subprocess_timeout_s) — bozuk env'de güvenli varsayılan.
+
+    Fail-closed: geçersiz/sıfır/negatif değer sessizce kabul edilmez; uyarı
+    loglanır ve varsayılana düşülür (0 saniyelik bekleme kilidi devre dışı
+    bırakırdı, negatif değer subprocess'i anında öldürüp sahte FAIL üretirdi).
+    """
+    def _s(ad, varsayilan):
+        ham = os.environ.get(ad, varsayilan)
+        try:
+            v = int(ham)
+        except (TypeError, ValueError):
+            log.warning(f"{ad} sayı değil ({ham!r}) — varsayılan "
+                        f"{varsayilan} kullanıldı")
+            return int(varsayilan)
+        if v <= 0:
+            log.warning(f"{ad} geçersiz ({v}) — varsayılan "
+                        f"{varsayilan} kullanıldı")
+            return int(varsayilan)
+        return v
+
+    bekleme = _s("CUMULUS_LOCK_WAIT", BUILD_LOCK_WAIT)
+    pay = _s("CUMULUS_BUILD_GRACE", BUILD_GRACE)
+    return bekleme, bekleme + pay
+
+
 def verify_build(cfg):
     """Kernel pull sonrası build doğrulama — Cumulus kritik.
+
     PIPE BUG: 'make | tail' make RC'sini yutuyor → çıktı dosyaya yaz,
-    RC doğrudan make'ten alınır."""
+    RC doğrudan make'ten alınır.
+    KİLİT: `make clean && make` paylaşılan flock altında çalışır (yukarı bkz.).
+    Kilit doluysa (rc=75) doğrulama ATLANIR — sahte FAIL ile push engellenmez;
+    subprocess zaman aşımı kilit beklemesinden büyüktür ki 75 yolu gerçekten
+    tetiklenebilsin (eşitlikte TimeoutExpired devreye girip FAIL üretiyordu).
+    """
     kernel_cfg = cfg["dirs"].get("kernel")
     if not kernel_cfg:
         return True
+    bekleme, zamasimi = _build_zaman_asimlari()
     paths = kernel_cfg.get("paths") or [kernel_cfg.get("path", "")]
     for p in paths:
         pexp = os.path.expanduser(p)
@@ -1882,14 +1934,31 @@ def verify_build(cfg):
         if not os.path.exists(os.path.join(pexp, "Makefile")):
             continue
         log.info(f"Build doğrulama: {pexp}")
-        # RC'yi doğrudan make'ten al — pipe YOK
+        # RC'yi doğrudan make'ten al — pipe YOK; build paylaşılan flock altında
         out, rc = run_cmd(
-            f'cd "{pexp}" && make clean >/dev/null 2>&1 && '
-            f'make >/tmp/sync_motor_build.log 2>&1; echo "RC=$?"',
-            timeout=300, shell=True)
+            f'cd "{pexp}" && '
+            f'flock -w {bekleme} -E 75 {BUILD_LOCK} '
+            f"bash -c 'make clean >/dev/null 2>&1 && make' "
+            f'>/tmp/sync_motor_build.log 2>&1; echo "RC=$?"',
+            timeout=zamasimi, shell=True)
         # Son satırda RC=... var
         rc_line = [l for l in out.splitlines() if l.startswith("RC=")]
-        build_rc = int(rc_line[-1].split("=")[1]) if rc_line else -1
+        # Sayı olmayan RC (ör. cmd.exe'de genişlemeyen 'RC=$?') çökme üretmemeli;
+        # fail-closed: ayrıştırılamayan çıktı DOĞRULANMIŞ sayılmaz.
+        build_rc = -1
+        if rc_line:
+            try:
+                build_rc = int(rc_line[-1].split("=")[1])
+            except (ValueError, IndexError):
+                log.warning(f"Build RC ayrıştırılamadı ({rc_line[-1]!r}) — "
+                            f"doğrulanmamış sayıldı")
+                build_rc = -1
+        if build_rc == 75:
+            # Kilit dolu (başka işçi build/test yapıyor) — ATLA, FAIL sayma.
+            log.warning(
+                f"Build doğrulama ATLANDI (kilit dolu, rc=75): {pexp} "
+                f"— sonraki koşuda yeniden denenecek")
+            return True
         if build_rc != 0:
             log.error(f"Build BAŞARISIZ: {pexp} (RC={build_rc})")
             tail = "\n".join(out.splitlines()[-5:])

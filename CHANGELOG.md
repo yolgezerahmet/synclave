@@ -1,5 +1,31 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.2] — 2026-09-14 (build kilidi: "kilit dolu" atlaması gerçekten çalışır hale getirildi)
+
+- **fix: `verify_build` build kilidi port edildi + zaman aşımı yarışı kapatıldı.**
+  Twin repo'da (`cumulus-sync-motor`, c6050284) commit edilen `flock` düzeltmesi
+  public repo'ya taşınmamıştı; kopya paritesi kapısı yakaladı
+  (`test_kopya_parite.py::test_ikiz_depo_paritesi` → 1 failed / 375 passed,
+  "sync_motor.py: kök kopyaları ayrıştı"). Taşımada İKİ gerçek kusur ölçüldü:
+  - **D1 — zaman aşımı yarışı (fail-closed ihlali):** `flock -w 1800` ile
+    `subprocess timeout=1800` EŞİTken flock 75 döndüremeden süreç kill
+    ediliyordu; `run_cmd` TimeoutExpired'da `("timeout", -1)` döner, çıktıda
+    `RC=` bulunmaz → `build_rc = -1` → FAIL → **push bloke**. Yani düzeltmenin
+    engellemeye çalıştığı sahte FAIL geri geliyordu. Artık
+    `timeout = kilit beklemesi + BUILD_GRACE` (varsayılan 1800 + 900 = 2700s);
+    `timeout > bekleme` değişmezi ayrıca test kapısıdır.
+  - **D2 — RC ayrıştırma çökmesi:** cmd.exe `$?` genişletmez → `RC=$?` satırı
+    korumasız `int()` ile yakalanmamış `ValueError` üretiyordu (Windows push
+    yolu çökerdi). Ayrıştırma fail-closed yapıldı: sayı olmayan RC doğrulanmış
+    sayılmaz (FAIL), çökme yok.
+  - `CUMULUS_LOCK_WAIT` / `CUMULUS_BUILD_GRACE` bozuk, sıfır veya negatifse
+    uyarı loglanır ve güvenli varsayılana düşülür (0 saniyelik bekleme kilidi
+    devre dışı bırakırdı).
+  - Test: `tests/test_build_kilit.py` — 15 test: rc=75 atlama + uyarı, rc!=0
+    kapı, rc=0 PASS, bozuk RC fail-closed, `RC=` satırı yok fail-closed,
+    zaman aşımı > bekleme, bozuk env → varsayılan, flock komut biçimi +
+    build komutuna retry YASAĞI (`_is_idempotent_read` False).
+
 ## [2.7.1] — 2026-09-14 (audit log yolu tek kaynak + KARARSIZ kapı kapatıldı)
 
 - **fix: audit log yolu artık tek kaynaktan** (`sync_memory.audit_log_path`).
