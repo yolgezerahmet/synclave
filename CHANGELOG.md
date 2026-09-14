@@ -1,67 +1,70 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
-## [2.7.4] — 2026-09-14 (Windows kurulum dokümanı: pip tuzağı + restic uç noktası)
+## [2.7.5] — 2026-09-15 (retention node döngüsünden ÖNCE de çalışır — defense-in-depth)
 
-- **fix: README Windows bölümü kullanıcıyı YANLIŞ kuruluma yönlendiriyordu.**
-  `pip install rclone` ve `pip install restic` satırları duruyordu. İkisi de
-  **Go binary**'sidir; pip resmi dağıtım yolu değildir. Canlı ölçüm
-  (pypi.org/pypi): `rclone` → "A robust, typed Python wrapper for the rclone CLI"
-  (yani rclone CLI'sini YİNE ister); `restic` → "A modern, type-safe Python
-  library for building robust REST API clients" (yedek motoruyla ALAKASIZ).
-  Dokümanı izleyen Windows kullanıcısı "kurulum tamam" sanıp runtime'da
-  `rclone: command not found` alıyordu. Doğru yol yazıldı:
+- **feat: `_restic_retention(cfg, dry_run)` ayrıştırıldı + `SYNC_RETENTION_ORDER`
+  (first|last|both, varsayılan both).** Hermes cron script timeout'u SABİT 3600s
+  (`cron/scheduler.py:1105 _DEFAULT_SCRIPT_TIMEOUT`; job `timeout` alanı script
+  koşularında KULLANILMAZ — kanıt: job 2bca1d045851 timeout=7200 iken "Script
+  timed out after 3600s"). Node döngüsü ~24 dk ölçüldü (20:01 → 20:25, canlı
+  `ps`); sonda kalan forget ilk aç kalan adımdı (snapshot 667 → 725, +58/gün).
+  `forget` idempotent olduğundan ve `--keep-daily 7` bugünün snapshot'ını
+  koruduğundan ilk adımda da çağrılır → koşu 3600s'te öldürülse bile retention
+  TAMAMLANMIŞ olur.
+- Kilit süpürme: `restic unlock` (YALNIZCA bayat kilitler; `--remove-all` DEĞİL,
+  uzak makinenin canlı kilidine dokunmaz), `--retry-lock` 30m → 2m
+  (`SYNC_RETENTION_RETRY_LOCK`), `forget` sınırlı timeout + süre ölçümü
+  (`SYNC_RETENTION_TIMEOUT=900`, `SYNC_RETENTION_DRY_RUN`, `SYNC_RETENTION_UNLOCK`).
+- **fix: `_restic` zaman aşımı fail-soft.** `TimeoutExpired` yakalanır →
+  `(-1, "TIMEOUT Ns <çıktı kuyruğu>")`; önceden traceback çökmesi: rc/rapor/log
+  yok, kilit saatlerce tutulurdu.
+- **not: retention `--prune` yalnız 04:00'te** (üç makine eşzamanlı prune aynı
+  repo'yu kilitler; repo bozulabilir — H2 bulgusu).
+
+## [2.7.4] — 2026-09-14 (retention açlığı kapatıldı + Windows kurulumu düzeltildi)
+
+- **fix: retention açlığı zinciri (`f7edde12`) — ölçülü.** `forget` aylardır
+  tamamlanmıyordu; repoda **667 snapshot** birikti (420 keep / 247 remove tasarımı).
+  Zincir: 14 node'un node-fazı toplamı ~1706s (GDrive REST gecikmesi; 0 değişiklikte
+  bile patent 1:38) → `BUTCE_BACKUP_S=1800`'ün ~%95'i node fazında bitiyor → süre
+  dolunca SIGKILL → restic kilidini BIRAKAMAZ → yetim kilit (kanıt: 17:54:56 lock
+  `"exclusive":false`, pid 532056 ÖLÜ) → sonraki forget eski `--retry-lock 30m`
+  boyunca bekleyip yine öldürülüyordu (`restic unlock` tek başına 54s). Düzeltme:
+  `_restic` zaman aşımında **fail-soft** (`TimeoutExpired` yakalanır → `(-1, "TIMEOUT Ns ...")`;
+  önceden traceback ile çöküyordu, rc/rapor/log yok), retention'da **yetim kilit
+  süpürme** (`restic unlock` — `--remove-all` DEĞİL, uzak makinenin CANLI kilidine
+  dokunulmaz), `--retry-lock` 30m → **2m** (`SYNC_RETENTION_RETRY_LOCK`), `forget`'e
+  SINIRLI timeout + süre ölçümü (`SYNC_RETENTION_TIMEOUT`, varsayılan 900s),
+  `SYNC_RETENTION_DRY_RUN`, `SYNC_RETENTION_UNLOCK`.
+- **not: `BUTCE_BACKUP_S` 3000s denemesi GERİ ALINDI (1800s).** Toplam adım bütçesi
+  `DIS_KAPI_S=3600`'ü aşamaz — `tests/test_node_agent_butce.py`
+  (`test_toplam_butce_diskapinin_altinda`) bunu yakaladı. Retention'ın sığması
+  **dış kapı + dış cron timeout artışı** gerektirir → SAHİP KARARI (gerekçe koda yorum
+  olarak yazıldı).
+- **fix: sürüm üçlüsü 2.7.4'e tamamlandı.** `sync_motor.py` 2.7.4 iken
+  `pyproject.toml` ve `synclave/__init__.py` 2.7.3'te kalmıştı → bu depoda sürüm
+  kapıları kırmızıydı (`test_surum_tek_kaynak_ve_changelog_ile_uyumlu`,
+  `test_paket_surumu_tek_kaynak_pyproject_paket_motor`). Dört kaynak (pyproject +
+  paket `__init__` + motor + bu başlık) tek değere bağlandı.
+- **docs: Windows kurulumu düzeltildi (README + `docs/windows.md`).**
+  `pip install rclone` / `pip install restic` **YANLIŞ yoldu**: ikisi de Go binary'si.
+  Canlı ölçüm (pypi.org/pypi): `rclone` → "A robust, typed Python wrapper for the
+  rclone CLI" (rclone CLI'sini YİNE ister); `restic` → "A modern, type-safe Python
+  library for building robust REST API clients" (yedek motoruyla ALAKASIZ) →
+  dokümanı izleyen kullanıcı runtime'da `rclone: command not found` alıyordu. Artık
   `winget install Rclone.Rclone` / `winget install restic.restic`
-  (winget-pkgs manifestleri canlı doğrulandı: `manifests/r/Rclone/Rclone`,
-  `manifests/r/restic/restic`) + resmi binary alternatifi + `rclone version` /
-  `restic version` doğrulaması.
-- **fix: Syncthing kimliği kanonik yazıma çevrildi**
-  (`syncthing.syncthing` → `Syncthing.Syncthing`; winget-pkgs yolu
-  `s/Syncthing/Syncthing`).
-- **fix: restic'in BAĞLANDIĞI uç nokta hiçbir yerde yazılı değildi**
-  (OceanAPI gpt-5.6-sol denetim bulgusu). README `rclone serve restic ...`
-  komutunu veriyor, ama motorun bağlandığı adresi (kod: `RESTIC_REPO_URL`
-  varsayılanı `rest:http://127.0.0.1:8443/`) ve `RESTIC_REPO_URL` ile üzerine
-  yazma yolunu yazmıyordu → farklı addr/port/uzak yolda sunan kullanıcı sessizce
-  bağlanamıyordu.
-- **fix: `setx` kapsamı belirtildi.** `setx` yalnızca SONRADAN açılan süreçlere
-  işler; görev `SYSTEM`/başka kullanıcı bağlamında çalışıyorsa kullanıcı ortam
-  değişkeni GÖRÜNMEZ → token görev tanımında da verilmeli (yoksa mesh adımı
-  sessizce yetkisiz kalır).
-- **Kapı: yeni test dosyası `tests/test_readme_kurulum.py` (398 → 407 test).**
-  - `pip install rclone|restic` bir TALİMAT olarak yasak; UYARI bağlamındaki
-    ("pip değil", "KURMAZ") anmalar serbest — tuzağı adıyla göstermek okuyucuya
-    değer katar. Kapının kendisi pozitif/negatif kontrolle test edilir (ölü kapı
-    koruması: çıplak talimat satırı yakalanmalı, uyarı satırı serbest kalmalı).
-  - Windows bölümü winget kimliklerini + `version` doğrulamasını + uçtan uca
-    adımları (rclone config / serve restic / A2A_TOKEN / ilk senkron) içerir.
-  - **Sapma kapısı:** dokümandaki restic uç noktası = `sync_motor.py` kaynak
-    literali (runtime değeri DEĞİL — test ortamında `RESTIC_REPO_URL` tanımlıysa
-    yanlış kırmızı verirdi).
-  - Ölçüm (tick sonu): `407 passed` (5.15s), RC=0.
-- **fix: twin'in (private) "retention açlığı" düzeltmeleri public'e taşındı —
-  parite yeşil.** Tick ORTASINDA twin `f7edde12` ile iki gerçek düzeltme commit'ledi
-  ve sürümü 2.7.4'e çekti; sürümler eşitlenince parite kapısı doğru şekilde KIRMIZI
-  oldu (`sync_motor.py`/`node_agent.py` kök kopyaları ayrıştı). Taşınanlar:
-  - `_restic`: `subprocess.run` zaman aşımında `TimeoutExpired` YAKALANIR (önceden
-    traceback ile çöküyordu → rc/rapor/log yok = sessiz ölüm) → artık fail-soft
-    `(-1, "TIMEOUT Ns <çıktı kuyruğu>")`.
-  - retention: yetim kilit süpürme (`restic unlock`, **`--remove-all` DEĞİL** →
-    uzak makinenin CANLI kilidi korunur), `--retry-lock` 30m → **2m**
-    (`SYNC_RETENTION_RETRY_LOCK`), forget'e SINIRLI timeout
-    (`SYNC_RETENTION_TIMEOUT`, varsayılan 900s) + süre ölçümü/log,
-    `SYNC_RETENTION_DRY_RUN`. Kanıt: 667 snapshot birikimi, 17:54:56 yetim kilit
-    (pid 532056 ölü), `restic unlock` tek başına 54s, node fazı ~1706s.
-  - `node_agent`: `BUTCE_BACKUP_S` 3000s denemesi GERİ ALINDI (1800s) — toplam adım
-    bütçesi `DIS_KAPI_S=3600`'ü aşamaz; `tests/test_node_agent_butce.py` bunu
-    yakaladı, gerekçe koda yorum olarak yazıldı (dış kapı artışı SAHİP KARARI).
-  - Ölçüm: kök/paket/node-paket `sync_motor.py` + `node_agent.py` kopyaları
-    byte-eşit (sha256 tek), parite kapısı yeşil.
-- **Kapı: yeni test dosyası `tests/test_restic_failsoft.py`** (taşınan davranışın
-  kanıtı — twin fix'i kendi testini getirmemişti): timeout fail-soft (istisna yok),
-  çıktı kuyruğunun mesaja girmesi, `timeout` değerinin `subprocess.run`'a geçmesi,
-  `--remove-all` KODDA yasak (yorum-anması serbest; kapı yorumları ayıklar),
-  `SYNC_RETENTION_*` env anahtarları + sınırlı forget timeout, eski `--retry-lock 30m`
-  regresyonu. Ölçüm (tick sonu): `413 passed`, RC=0.
+  (winget-pkgs manifestleri canlı doğrulandı) + resmi binary alternatifi + `version`
+  doğrulaması. Ayrıca **restic'in bağlandığı uç nokta** yazıldı
+  (`rest:http://127.0.0.1:8443/`, `RESTIC_REPO_URL` ile override) ve **`setx`
+  kapsamı** (yalnız yeni süreçler; görev SYSTEM/başka kullanıcı bağlamındaysa token
+  görünmez → görev tanımında da verilmeli). README'ye uçtan uca Windows bölümü eklendi.
+- **Kapılar:** `tests/test_readme_kurulum.py` (pip tuzağı yasağı + uyarı bağlamı
+  serbest; Windows bölümü sözleşmesi; doküman↔kod sapma kapısı) ve
+  `tests/test_restic_failsoft.py` (timeout fail-soft, çıktı kuyruğu, `timeout`
+  geçişi, `--remove-all` KODDA yasak, `SYNC_RETENTION_*` env, eski `retry-lock 30m`
+  regresyonu).
+- **Ölçüm (tick sonu):** `405 passed / 8 skipped`, RC=0; twin'in kök/paket kopyaları
+  byte-eşit; public (`hermes-sync`/`synclave`) ile ortak modüller byte-eşit.
 
 ## [2.7.3] — 2026-09-14 (sınırsız rclone çağrısı kapatıldı + yazmaya-retry ihlali geri alındı)
 

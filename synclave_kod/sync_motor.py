@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.4"
+__version__ = "2.7.5"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -2961,57 +2961,25 @@ def cmd_mesh(cfg, aksiyon, hedef="", gorev="", token="", dry_run=False):
     print("Kullanım: mesh send|status|update [hedef] [görev]")
     return 1
 
-def cmd_restic_backup(cfg, node=None, dry_run=False):
-    """Restic incremental backup (v2.0 — B modülü, 28 Ağu 2026).
+def _restic_retention(cfg, dry_run=False):
+    """Restic forget (retention) — TEK adım, İKİ KEZ çağrılabilir (v2.7.5).
 
-    rclone serve restic gdrive:restic-backup --addr 127.0.0.1:8443
-    (systemd servisi olarak çalışır; GDrive = object store, CDC dedup,
-    çoklu makine aynı repo → cross-system dedup).
+    14 Eyl 2026 (tick 089e3b2575f6) İKİNCİ KÖK NEDEN — "retention açlığı" sürüyor:
+    forget adımı `cmd_restic_backup` SONUNDA çağrılıyordu. Hermes cron script
+    runner'ın timeout'u SABİT 3600 s (cron/scheduler.py:1105
+    `_DEFAULT_SCRIPT_TIMEOUT = 3600`); işin `timeout` alanı script koşularında
+    KULLANILMAZ — kanıt: job 2bca1d045851 timeout=7200 iken hata metni
+    "Script timed out after 3600s". Node döngüsü ~14 node x 1-2 dk
+    (her restic çağrısı rclone/GDrive üzerinden indeksi yeniden yükler) ~24 dk
+    ölçüldü (canlı `ps`, koşu 20:01 -> 20:25). Bütçe yalnız node döngüsüne
+    yetiyor; forget sona kaldığı için uzun koşularda HİÇ tamamlanmıyordu
+    (snapshot 667 -> 725, +58/gün).
 
-    Her node: tag:node + exclude .git/.env/.key/.pem.
-    Retention: restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6.
+    Çözüm: retention İLK adım olarak da çağrılır. `forget` idempotenttir ve
+    `--keep-daily 7` bugünün snapshot'ını korur; koşu sonradan öldürülse bile
+    retention o koşuda TAMAMLANMIŞ olur.
+    Sıra: SYNC_RETENTION_ORDER = first|last|both (varsayılan both).
     """
-    nodes = [node] if node else list(cfg["dirs"].keys())
-    print(f"\n  💾 RESTIC INCREMENTAL YEDEK — {RESTIC_REPO_URL}")
-    # hermes node'u restic'ten HARİÇ: /root/.hermes (22GB+) exclude_dirs'la bile
-    # büyük; hermes-full node'u ayrı zstd script ile GDrive'a gidiyor (hermes_full_backup.py).
-    # include filtreleri restic'e yansımıyor — bu yüzden tam dizin yüklenirdi (H2 bulgusu).
-    skip_nodes = {k for k, v in cfg["dirs"].items()
-                  if isinstance(v, dict) and v.get("restic") is False}
-    nodes = [n for n in nodes if n not in skip_nodes]
-    for n in nodes:
-        dst = cfg["dirs"][n]
-        base = dst["path"] if isinstance(dst, dict) else dst
-        if not os.path.exists(base):
-            print(f"    ⚠ {n}: kaynak yok — atlandı"); continue
-        if dry_run:
-            print(f"    [DRY] {n}: restic backup {base} (tag:{n})")
-            continue
-        # Sabit güvenlik/gürültü dışlamaları
-        exc = ["--exclude", ".git", "--exclude", ".env",
-               "--exclude", "*.key", "--exclude", "*.pem",
-               "--exclude", "*.pyc", "--exclude", "node_modules"]
-        # 29 Ağu 2026 FIX (H2): config'teki exclude_dirs/max_size_kb YOKSAYILIYORDU.
-        # Kanıt: hermes node'u = AppData/Local/hermes = 13 GB; config backups(5GB) ve
-        # hermes-agent(3.9GB) dizinlerini dışlıyor ama restic hepsini yüklüyordu
-        # (34 KiB/s GDrive'da ~2-4 gün). Artık config niyeti restic'e aktarılır.
-        if isinstance(dst, dict):
-            seen = {".git", "node_modules"}
-            for d in (dst.get("exclude_dirs") or []):
-                if d and d not in seen:
-                    seen.add(d)
-                    exc += ["--exclude", d]
-            mkb = dst.get("max_size_kb")
-            if mkb:
-                exc += ["--exclude-larger-than", f"{int(mkb)}k"]
-        rc, out = _restic(["backup", base, "--tag", n] + exc)
-        if rc == 0:
-            # özet satırlarını göster
-            for line in out.splitlines():
-                if line.startswith(("Files:", "Added to", "snapshot", "processed")):
-                    print(f"    ✅ {n}: {line.strip()}")
-        else:
-            print(f"    ❌ {n}: {out.strip()[-200:]}")
     # retention (tüm repo) — SADECE birincil makinede (H2 bulgusu: üç makine
     # eşzamanlı prune aynı repo'yu kilitler; repo bozulabilir)
     ret_machine = os.environ.get("SYNC_RETENTION_MACHINE") or cfg.get("retention_machine", "")
@@ -3053,6 +3021,66 @@ def cmd_restic_backup(cfg, node=None, dry_run=False):
     elif not dry_run:
         print(f"    🧹 retention: atlandı (bu makine yedekliyor, prune {ret_machine} yapar)")
 
+def cmd_restic_backup(cfg, node=None, dry_run=False):
+    """Restic incremental backup (v2.0 — B modülü, 28 Ağu 2026).
+
+    rclone serve restic gdrive:restic-backup --addr 127.0.0.1:8443
+    (systemd servisi olarak çalışır; GDrive = object store, CDC dedup,
+    çoklu makine aynı repo → cross-system dedup).
+
+    Her node: tag:node + exclude .git/.env/.key/.pem.
+    Retention: restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6.
+    """
+    nodes = [node] if node else list(cfg["dirs"].keys())
+    print(f"\n  💾 RESTIC INCREMENTAL YEDEK — {RESTIC_REPO_URL}")
+    # hermes node'u restic'ten HARİÇ: /root/.hermes (22GB+) exclude_dirs'la bile
+    # büyük; hermes-full node'u ayrı zstd script ile GDrive'a gidiyor (hermes_full_backup.py).
+    # include filtreleri restic'e yansımıyor — bu yüzden tam dizin yüklenirdi (H2 bulgusu).
+    skip_nodes = {k for k, v in cfg["dirs"].items()
+                  if isinstance(v, dict) and v.get("restic") is False}
+    nodes = [n for n in nodes if n not in skip_nodes]
+    # v2.7.5 — retention ÖNCE: 3600 s script timeout'u node döngüsünü zar zor
+    # karşılıyor, forget sonda kalınca hiç çalışmıyordu (kanıt: indeks yükleme).
+    _ret_order = os.environ.get("SYNC_RETENTION_ORDER", "both")
+    if _ret_order in ("first", "both"):
+        _restic_retention(cfg, dry_run)
+    for n in nodes:
+        dst = cfg["dirs"][n]
+        base = dst["path"] if isinstance(dst, dict) else dst
+        if not os.path.exists(base):
+            print(f"    ⚠ {n}: kaynak yok — atlandı"); continue
+        if dry_run:
+            print(f"    [DRY] {n}: restic backup {base} (tag:{n})")
+            continue
+        # Sabit güvenlik/gürültü dışlamaları
+        exc = ["--exclude", ".git", "--exclude", ".env",
+               "--exclude", "*.key", "--exclude", "*.pem",
+               "--exclude", "*.pyc", "--exclude", "node_modules"]
+        # 29 Ağu 2026 FIX (H2): config'teki exclude_dirs/max_size_kb YOKSAYILIYORDU.
+        # Kanıt: hermes node'u = AppData/Local/hermes = 13 GB; config backups(5GB) ve
+        # hermes-agent(3.9GB) dizinlerini dışlıyor ama restic hepsini yüklüyordu
+        # (34 KiB/s GDrive'da ~2-4 gün). Artık config niyeti restic'e aktarılır.
+        if isinstance(dst, dict):
+            seen = {".git", "node_modules"}
+            for d in (dst.get("exclude_dirs") or []):
+                if d and d not in seen:
+                    seen.add(d)
+                    exc += ["--exclude", d]
+            mkb = dst.get("max_size_kb")
+            if mkb:
+                exc += ["--exclude-larger-than", f"{int(mkb)}k"]
+        rc, out = _restic(["backup", base, "--tag", n] + exc)
+        if rc == 0:
+            # özet satırlarını göster
+            for line in out.splitlines():
+                if line.startswith(("Files:", "Added to", "snapshot", "processed")):
+                    print(f"    ✅ {n}: {line.strip()}")
+        else:
+            print(f"    ❌ {n}: {out.strip()[-200:]}")
+    # v2.7.5 — retention SONRA (sıra=last|both): bütçe yeterse idempotent no-op,
+    # 04:00 penceresinde --prune buradan eklenir.
+    if _ret_order in ("last", "both"):
+        _restic_retention(cfg, dry_run)
 def _ck_import():
     """sync_common_knowledge'i import et (ortak akıl)."""
     import importlib.util
