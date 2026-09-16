@@ -748,9 +748,21 @@ def _is_idempotent_read(cmd_text: str) -> bool:
 
 def _is_transient_rc(rc: int, err: str) -> bool:
     e = (err or "").lower()
+    # v2.7.6 (bağımsız denetim bulgusu — gpt-5.6-sol, 16 Eyl 2026): KALICI veto
+    # artık TÜM rc değerlerinde geçerli. Önceden yalnız rc == -1 yolunda
+    # uygulanıyordu; rc != 0 iken mesajda hem 5xx/geçici hem kalıcı işaret
+    # birlikte varsa komut GEÇİCİ sayılıp retry ediliyordu (fail-open).
+    # Ölçüm (fix ÖNCESİ, bu depo):
+    #   _is_transient_rc(1, "no such file or directory - 503 Service Unavailable") → True
+    #   _is_transient_rc(3, "command not found (temporary failure)")              → True
+    #   _is_transient_rc(1, "permission denied: i/o timeout")                     → True
+    # Ölçüm (fix SONRASI): üçü de False.
+    if any(m in e for m in _RETRY_FATAL):
+        return False
     if rc == -1:
-        # exception — dosya/komut yokluğu gibi KALICI hatalar geçici değil
-        return not any(m in e for m in _RETRY_FATAL)
+        # exception — kalan durumlar geçici kabul edilir (retry yalnız
+        # idempotent OKUMALARDA açıktır; run_cmd can_retry kapısı).
+        return True
     if re.search(r"\b5\d\d\b", e):
         return True
     return any(m in e for m in _RETRY_TRANSIENT)

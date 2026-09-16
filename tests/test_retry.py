@@ -1184,3 +1184,26 @@ def test_run_with_retry_oncelik_kapisi():
         "sınıflandırma tek kaynaktan yapılmıyor (sapma riski)"
 
 
+def test_kalici_veto_tum_rc_degerlerinde_gecerli():
+    """Denetim bulgusu (gpt-5.6-sol): KALICI işaret 5xx/geçici işareti YENER.
+
+    Ölçüm (fix ÖNCESİ, bu depo):
+      _is_transient_rc(1, "no such file or directory - 503 Service Unavailable") → True
+      _is_transient_rc(3, "command not found (temporary failure)")               → True
+      _is_transient_rc(1, "permission denied: i/o timeout")                      → True
+    Üçü de KALICI bir hatanın retry edilmesi demekti (fail-open): veto yalnız
+    `rc == -1` yolunda uygulanıyordu.
+    """
+    assert not sm._is_transient_rc(
+        1, "no such file or directory - 503 Service Unavailable")
+    assert not sm._is_transient_rc(3, "command not found (temporary failure)")
+    assert not sm._is_transient_rc(1, "permission denied: i/o timeout")
+
+    # Geçici yollar bozulmadı (retry almaya devam eder)
+    assert sm._is_transient_rc(1, "HTTP 503 Service Unavailable")
+    assert sm._is_transient_rc(1, "connection reset by peer")
+    assert sm._is_transient_rc(-1, "connection reset by peer")
+    assert sm._is_transient_rc(-1, "")
+    assert not sm._is_transient_rc(1, "directory not found")
+
+

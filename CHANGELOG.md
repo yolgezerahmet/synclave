@@ -22,9 +22,18 @@
   bilinmeyen istisna da anında yükselir (fail-closed), geçici işaretli istisna en
   çok `retries` kez denenir ve son denemede YÜKSELİR; asla `None` dönmez.
   Statik kapı: `tests/test_retry.py::test_run_with_retry_oncelik_kapisi`.
-- **test: 9 yeni regresyon testi** (kalıcı/geçici istisna ayrımı, izin reddi,
+- **test: 10 yeni regresyon testi** (kalıcı/geçici istisna ayrımı, izin reddi,
   yutma yasağı, bilinmeyen istisna fail-closed, mutlu yol, iki modül tutarlılık
-  kapısı, öncelik statik kapısı). Toplam: 413 → 422.
+  kapısı, öncelik statik kapısı, kalıcı veto/rc kapsamı). Toplam: 413 → 423.
+- **fix (bağımsız denetim bulgusu — gpt-5.6-sol, risk 3/10): kalıcı veto artık
+  TÜM rc değerlerinde geçerli (`_is_transient_rc`).** Önceden veto yalnız
+  `rc == -1` yolundaydı; `rc != 0` ve mesajda hem 5xx/geçici hem kalıcı işaret
+  birlikte varsa komut GEÇİCİ sayılıp retry ediliyordu (fail-open). Ölçüm
+  (fix ÖNCESİ): `_is_transient_rc(1, "no such file or directory - 503 Service
+  Unavailable")` → True; `(3, "command not found (temporary failure)")` → True;
+  `(1, "permission denied: i/o timeout")` → True. Fix SONRASI üçü de False;
+  geçici yollar (503 / connection reset / `rc=-1`) retry almaya devam ediyor —
+  kapı: `tests/test_retry.py::test_kalici_veto_tum_rc_degerlerinde_gecerli`.
 - **not: yazmaya retry politikası DEĞİŞMEDİ** (v2.1.1'den beri: yalnız idempotent
   okumalar; `copy/copyto/move/sync/delete/...` ASLA retry).
 
