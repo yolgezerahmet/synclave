@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.7"
+__version__ = "2.7.8"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -3080,7 +3080,15 @@ def cmd_restic_backup(cfg, node=None, dry_run=False):
     nodes = [n for n in nodes if n not in skip_nodes]
     # v2.7.5 — retention ÖNCE: 3600 s script timeout'u node döngüsünü zar zor
     # karşılıyor, forget sonda kalınca hiç çalışmıyordu (kanıt: indeks yükleme).
-    _ret_order = os.environ.get("SYNC_RETENTION_ORDER", "both")
+    # v2.7.8 (bağımsız denetim bulgusu, 17 Eyl 2026 — DONE-CHECK): knob'a
+    # TANINMAYAN değer gelirse (yazım hatası / büyük harf / boş / virgüllü)
+    # iki dal da tutmaz ve retention SESSİZCE hiç çalışmaz — v2.7.5 açlığı
+    # knob typo'suyla geri gelir. Ölçüm (fix ÖNCESİ): 'xyz'→0, 'FIRST'→0,
+    # ''→0, 'first,last'→0 çağrı. Fail-safe: normalize et, tanınmayan değeri
+    # varsayılan "both"a düşür (bilinmeyen = güvenli tam tur).
+    _ret_order = (os.environ.get("SYNC_RETENTION_ORDER") or "both").strip().lower()
+    if _ret_order not in ("first", "last", "both"):
+        _ret_order = "both"
     if _ret_order in ("first", "both"):
         _restic_retention(cfg, dry_run)
     for n in nodes:

@@ -149,9 +149,16 @@ def test_retention_node_dongusunden_once_cagrilir():
 
 
 def test_retention_sira_knobu_gecerli_degerler():
-    """Sıra knobu first|last|both; varsayılan both (fail-safe: iki kez)."""
+    """Sıra knobu normalize edilir; tanınmayan değer fail-safe 'both'a düşer.
+
+    v2.7.8: knob artık default-argümansız okunur (normalize + fail-safe düşüş).
+    """
     src = (REPO / "sync_motor.py").read_text(encoding="utf-8")
-    assert 'os.environ.get("SYNC_RETENTION_ORDER", "both")' in src
+    assert 'os.environ.get("SYNC_RETENTION_ORDER")' in src
+    assert ".strip().lower()" in src, "knob normalize edilmiyor (büyük harf/boşluk)"
+    assert '_ret_order not in ("first", "last", "both")' in src, (
+        "tanınmayan knob değeri için fail-safe düşüş yok → retention sessizce "
+        "hiç çalışmaz (v2.7.5 açlığı typo ile geri gelir)")
     assert '_ret_order in ("first", "both")' in src
     assert '_ret_order in ("last", "both")' in src
 
@@ -218,3 +225,35 @@ def test_retention_node_basina_degil_dongu_disinda(monkeypatch):
     assert r2 == r5 == 2, (
         f"retention node başına çağrılıyor olabilir: 2 node→{r2}, 5 node→{r5} "
         "(döngü dışında 2 olmalı)")
+
+
+# ─── v2.7.8 FAİL-SAFE KAPISI (17 Eyl 2026 — DONE-CHECK denetim bulgusu) ─────
+# Ölçülen kusur (fix ÖNCESİ): knob'a TANINMAYAN değer gelince ('xyz' / 'FIRST'
+# / '' / 'first,last') iki dal da tutmuyordu → retention 0 kez çağrılıyordu,
+# yani v2.7.5'te kapatılan "retention açlığı" bir yazım hatasıyla SESSİZCE geri
+# geliyordu (fail-open). Bu kapı hem normalize'ı hem fail-safe düşüşü ölçer.
+@pytest.mark.parametrize("deger,beklenen", [
+    ("FIRST", 1),      # büyük harf → normalize
+    (" Both ", 2),     # boşluklu/karışık harf → normalize
+    ("LAST", 1),       # büyük harf → normalize
+])
+def test_retention_knob_normalize_edilir(monkeypatch, deger, beklenen):
+    """DAVRANIŞ: knob büyük harf/boşluk toleranslı (normalize) çalışır."""
+    olaylar = _retention_kos(monkeypatch, deger)
+    r = [i for i, o in enumerate(olaylar) if o[0] == "retention"]
+    assert len(r) == beklenen, (
+        f"{deger!r} normalize edilmedi: {beklenen} çağrı beklenirdi, "
+        f"{len(r)} alındı")
+
+
+@pytest.mark.parametrize("deger", ["xyz", "", "first,last", "0", "true", "both "])
+def test_retention_taninmayan_knob_fail_safe(monkeypatch, deger):
+    """DAVRANIŞ: tanınmayan knob retention'ı KAPATMAZ → fail-safe 'both' (2)."""
+    olaylar = _retention_kos(monkeypatch, deger)
+    r = [i for i, o in enumerate(olaylar) if o[0] == "retention"]
+    n = [i for i, o in enumerate(olaylar) if o[0] == "backup"]
+    assert len(r) == 2, (
+        f"{deger!r}: fail-safe 'both' beklenirdi (2 çağrı), {len(r)} alındı — "
+        "tanınmayan knob değeri retention'ı sessizce kapatıyor (fail-open)")
+    assert r[0] < n[0] < r[-1], (
+        f"{deger!r}: fail-safe turunda biri döngüden ÖNCE biri SONRA olmalı")

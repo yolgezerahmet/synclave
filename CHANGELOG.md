@@ -1,5 +1,29 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.8] — 2026-09-17 (fix: tanınmayan retention knob değeri retention'ı SESSİZCE kapatıyordu — fail-safe)
+
+- **fix (`sync_motor.cmd_restic_backup`): `SYNC_RETENTION_ORDER` knobu artık
+  normalize edilir ve tanınmayan değer varsayılan `both`a düşer.**
+  Bağımsız DONE-CHECK denetimi (gpt-5.6-sol) bulgusu; ÖLÇÜM (fix ÖNCESİ, bu
+  depo): iki dal (`in ("first","both")` / `in ("last","both")`) tanınmayan
+  değerde hiçbirini tutmaz →
+  `knob='xyz'` → **0 çağrı**, `'FIRST'` → **0**, `''` → **0**,
+  `'first,last'` → **0**. Yani v2.7.5'te kapatılan "retention açlığı"
+  (forget hiç çalışmıyor → snapshot birikimi) tek bir yazım hatasıyla
+  SESSİZCE geri geliyordu: fail-open. Fix sonrası bu dört değer 2 çağrı
+  (fail-safe tam tur: biri döngüden önce, biri sonra); `FIRST`/`LAST` gibi
+  büyük harf ve `" Both "` gibi boşluklu değerler doğru normalize edilir.
+- **test: 9 yeni davranış testi** —
+  `test_retention_knob_normalize_edilir` (3 parametre: FIRST / " Both " / LAST)
+  ve `test_retention_taninmayan_knob_fail_safe` (6 parametre: `xyz`, `""`,
+  `first,last`, `0`, `true`, `"both "`). Statik kapı
+  `test_retention_sira_knobu_gecerli_degerler` yeni sözleşmeye güncellendi
+  (default-argümansız okuma + `.strip().lower()` + fail-safe düşüş dalı).
+- **test: 431 → 440** (`tests/` tam suite; twin'de 432 + beklenen skip'ler).
+- **not: sıra semantiği değişmedi** — `first` yalnız önce, `last` yalnız sonra,
+  `both`/bilinmeyen ikisi de (idempotent); yazma komutlarına retry yasağı ve
+  diğer fail-closed kurallar aynen geçerli.
+
 ## [2.7.7] — 2026-09-17 (parite + DAVRANIŞ kapısı: retention sıra sözleşmesi artık ölçülüyor)
 
 - **test (parite): twin'de olup public'te EKSİK kalan 3 retention-sıra kapısı
