@@ -257,3 +257,51 @@ def test_retention_taninmayan_knob_fail_safe(monkeypatch, deger):
         "tanınmayan knob değeri retention'ı sessizce kapatıyor (fail-open)")
     assert r[0] < n[0] < r[-1], (
         f"{deger!r}: fail-safe turunda biri döngüden ÖNCE biri SONRA olmalı")
+
+
+# ─── KENAR DURUM KAPILARI (17 Eyl 2026 — son denetim önerisi) ───────────────
+def test_retention_node_listesi_bosken_de_uygulanir(monkeypatch):
+    """DAVRANIŞ: tüm node'lar restic:False olsa da retention ÇALIŞIR.
+
+    Yedeklenecek node kalmasa bile kendi snapshot'larımız budanmalı — aksi
+    halde "node yok" günü retention sessizce atlanır ve birikim sürer.
+    """
+    olaylar = []
+    cfg = {"dirs": {"a": {"path": "/sahte/a", "restic": False},
+                    "b": {"path": "/sahte/b", "restic": False}}}
+    monkeypatch.setattr(sm, "_restic_retention",
+                        lambda c, d=False: olaylar.append(("retention",)))
+    monkeypatch.setattr(sm, "_restic",
+                        lambda args, **kw: olaylar.append(("backup", args[1])))
+    monkeypatch.setattr(sm.os.path, "exists", lambda p: True)
+    monkeypatch.delenv("SYNC_RETENTION_ORDER", raising=False)
+    sm.cmd_restic_backup(cfg, dry_run=False)
+    assert [o[0] for o in olaylar] == ["retention", "retention"], (
+        "node kalmadığında retention atlanmamalı (snapshot birikimi)")
+    assert not [o for o in olaylar if o[0] == "backup"], (
+        "restic:False node yedeklenmemeli (skip_nodes filtresi)")
+
+
+def test_node_dongusu_hatasinda_en_az_bir_retention_turu(monkeypatch):
+    """SINIR (belgelenmiş): node döngüsünde istisna → 'first' turu TAMAMLANMIŞ olur.
+
+    Tasarım sınırı: sonda kalan 'last' çağrısına ulaşılmaz (istisna yayılır).
+    Bu yüzden varsayılan 'both' seçildi — bütçe/istisna durumunda bile en az
+    bir retention turu çalışmış olur (v2.7.5 açlığının kökü buydu).
+    """
+    olaylar = []
+    cfg = {"dirs": {"a": {"path": "/sahte/a"}}}
+
+    def patlat(args, **kw):
+        raise RuntimeError("simule node hatasi")
+
+    monkeypatch.setattr(sm, "_restic_retention",
+                        lambda c, d=False: olaylar.append("retention"))
+    monkeypatch.setattr(sm, "_restic", patlat)
+    monkeypatch.setattr(sm.os.path, "exists", lambda p: True)
+    monkeypatch.delenv("SYNC_RETENTION_ORDER", raising=False)
+    with pytest.raises(RuntimeError):
+        sm.cmd_restic_backup(cfg, dry_run=False)
+    assert olaylar.count("retention") == 1, (
+        "istisna halinde ilk (first) retention tamamlanmış olmalı — en az bir "
+        "tur garantisi; ikinci çağrıya ulaşılmaz (belgelenmiş sınır)")

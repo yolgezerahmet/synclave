@@ -19,7 +19,14 @@
   `first,last`, `0`, `true`, `"both "`). Statik kapı
   `test_retention_sira_knobu_gecerli_degerler` yeni sözleşmeye güncellendi
   (default-argümansız okuma + `.strip().lower()` + fail-safe düşüş dalı).
-- **test: 431 → 440** (`tests/` tam suite; twin'de 432 + beklenen skip'ler).
+- **test: 2 kenar-durum kapısı** (son denetim önerisi) —
+  `test_retention_node_listesi_bosken_de_uygulanir` (tüm node'lar `restic:False`
+  olsa da retention çalışır; "node yok" günü birikim sürmesin) ve
+  `test_node_dongusu_hatasinda_en_az_bir_retention_turu` (döngü istisnasında
+  `first` turu tamamlanmış olur — varsayılanın `both` seçilmesinin gerekçesi
+  belgelenmiş sınır olarak sabitlendi).
+- **test: 431 → 442** (`tests/` tam suite; twin'de 434 passed + 8 beklenen skip
+  — `synclave_kod/` ve kök self-check betiği twin/private klonda yok).
 - **not: sıra semantiği değişmedi** — `first` yalnız önce, `last` yalnız sonra,
   `both`/bilinmeyen ikisi de (idempotent); yazma komutlarına retry yasağı ve
   diğer fail-closed kurallar aynen geçerli.
