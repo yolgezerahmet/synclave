@@ -1,5 +1,29 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.7] — 2026-09-17 (parite + DAVRANIŞ kapısı: retention sıra sözleşmesi artık ölçülüyor)
+
+- **test (parite): twin'de olup public'te EKSİK kalan 3 retention-sıra kapısı
+  public'e taşındı.** Ölçüm: `diff -rq synclave/` TEMİZ (kod birebir aynı) ama
+  `tests/test_restic_failsoft.py` twin'de 156 satır / public'te 121 satır —
+  `test_retention_once_kaynagi_tek_fonksiyon`,
+  `test_retention_node_dongusunden_once_cagrilir`,
+  `test_retention_sira_knobu_gecerli_degerler` public'te YOKTU. Yani v2.7.5
+  retention-açlığı düzeltmesinin kanıt kapısı yalnız private repoda duruyordu;
+  public'te sessizce geri alınabilirdi.
+- **test (davranış kapısı — bağımsız denetim bulgusu, gpt-5.6-sol):** taşınan
+  kapılar kaynak METNİNİ sayar; işlev doğruyken yorum/tırnak/biçim değişimi
+  testi kırar ve asıl sözleşmeyi KANITLAMAZ (`both` varsayılanında retention'ın
+  döngü DIŞINDA toplam iki kez çağrıldığı ölçülmüyordu). Eklendi:
+  `test_retention_sayisi_ve_sirasi_davranissal` (first/last/both/env-yok →
+  sırasıyla 1/1/2/2 çağrı + çağrı sırasının node döngüsüne göre ÖNCE/SONRA
+  olması) ve `test_retention_node_basina_degil_dongu_disinda` (2 node → 2,
+  5 node → 2; sayı node sayısıyla ARTMAZ). Mock'lu koşum: gerçek restic
+  çağrılmaz, `_restic`/`_restic_retention` olay kaydıyla izlenir.
+- **kanıt (mutasyon):** `if _ret_order in ("first", "both")` dalı kapatılıp
+  koşuldu — metin kapıları 9/9 PASS (mutasyonu KAÇIRDI), davranış kapıları
+  5 FAIL (yakaladı). Kaynak geri alındı, kök kopya ile birebir doğrulandı.
+- **test sayısı: 426 → 431** (`tests/` tam suite, 0 FAIL).
+
 ## [2.7.6] — 2026-09-16 (retry: iki ÖLÇÜLMÜŞ kusur — kalıcı istisna retry'i + istisna yutma)
 
 - **fix: `run_cmd` istisna yolunda tanı `err`'e de yazılır (`_exec`).**

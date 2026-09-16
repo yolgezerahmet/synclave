@@ -119,3 +119,102 @@ def test_retention_eski_sinirsiz_retry_lock_geri_gelmedi():
     assert '"--retry-lock", "30m"' not in KOK, (
         "eski `--retry-lock 30m` geri gelmiş — node fazı bütçeyi yiyip forget'i "
         "yine SIGKILL'e götürür")
+
+
+# ─── v2.7.5 retention SIRASI (14 Eyl 2026, tick 089e3b2575f6) ───────────────
+# İkinci kök neden: forget adımı cmd_restic_backup SONUNDA çağrılıyordu; Hermes
+# cron script timeout'u sabit 3600 s (scheduler.py `_DEFAULT_SCRIPT_TIMEOUT`),
+# node döngüsü ~24 dk ölçüldü → forget uzun koşularda HİÇ çalışmıyordu
+# (snapshot 667 -> 725, +58/gün). Kapı: retention node döngüsünden ÖNCE de çağrılmalı.
+def test_retention_once_kaynagi_tek_fonksiyon():
+    """Retention tek fonksiyonda toplanır (iki çağrı noktası, tek gövde)."""
+    src = (REPO / "sync_motor.py").read_text(encoding="utf-8")
+    assert src.count("def _restic_retention(") == 1, "retention gövdesi tek olmalı"
+    # Eski gömülü blok kalmamalı (çift gövde = davranış sapması)
+    assert src.count('print(f"    🧹 retention: OK') == 1
+    assert src.count('"--keep-daily", "7"') == 1
+
+
+def test_retention_node_dongusunden_once_cagrilir():
+    """SIRA KAPISI: ilk _restic_retention çağrısı, ilk node döngüsünden ÖNCE."""
+    src = (REPO / "sync_motor.py").read_text(encoding="utf-8")
+    govde = src[src.index("def cmd_restic_backup("):]
+    cagri = govde.index("_restic_retention(cfg, dry_run)")
+    dongu = govde.index("for n in nodes:")
+    assert cagri < dongu, "retention ÖNCE çağrılmıyor — 3600 s bütçesi onu açlığa iter"
+    # Ve sonda da (idempotent) çağrı kalmalı
+    assert govde.count("_restic_retention(cfg, dry_run)") >= 2
+    assert "SYNC_RETENTION_ORDER" in govde
+    assert '"both"' in govde
+
+
+def test_retention_sira_knobu_gecerli_degerler():
+    """Sıra knobu first|last|both; varsayılan both (fail-safe: iki kez)."""
+    src = (REPO / "sync_motor.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("SYNC_RETENTION_ORDER", "both")' in src
+    assert '_ret_order in ("first", "both")' in src
+    assert '_ret_order in ("last", "both")' in src
+
+
+# ─── DAVRANIŞ KAPISI (17 Eyl 2026 — bağımsız denetim bulgusu, gpt-5.6-sol) ───
+# Yukarıdaki üç kapı kaynak METNİNİ sayar; kırılgandır (yorum/tırnak/biçim
+# değişimi işlev doğruyken testi kırar) ve asıl sözleşmeyi KANITLAMAZ:
+# SYNC_RETENTION_ORDER knobu retention'ın KAÇ KEZ ve NEREDE çağrıldığını
+# belirler. Bu kapı mock'lu çalıştırmayla sayı + sıra ölçer — gerçek restic
+# ÇAĞRILMAZ, node döngüsü sahte olay kaydıyla izlenir.
+def _retention_kos(monkeypatch, order, node_sayisi=2):
+    """cmd_restic_backup'ı mock'lu koştur; olay dizisini döndür.
+
+    Olaylar: ("retention",) veya ("backup", <node yolu>), çağrı sırasıyla.
+    """
+    olaylar = []
+    cfg = {"dirs": {f"n{i}": {"path": f"/sahte/kaynak-{i}"}
+                    for i in range(node_sayisi)}}
+    monkeypatch.setattr(sm, "_restic_retention",
+                        lambda c, d=False: olaylar.append(("retention",)))
+    monkeypatch.setattr(
+        sm, "_restic",
+        lambda args, **kw: (olaylar.append(("backup", args[1])), (0, ""))[1])
+    monkeypatch.setattr(sm.os.path, "exists", lambda p: True)
+    if order is None:
+        monkeypatch.delenv("SYNC_RETENTION_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("SYNC_RETENTION_ORDER", order)
+    sm.cmd_restic_backup(cfg, dry_run=False)
+    return olaylar
+
+
+@pytest.mark.parametrize("order,beklenen", [
+    ("first", 1),
+    ("last", 1),
+    ("both", 2),
+    (None, 2),          # knop YOK → varsayılan "both" (fail-safe)
+])
+def test_retention_sayisi_ve_sirasi_davranissal(monkeypatch, order, beklenen):
+    """DAVRANIŞ: retention çağrı sayısı + node döngüsüne göre SIRASI."""
+    olaylar = _retention_kos(monkeypatch, order)
+    r = [i for i, o in enumerate(olaylar) if o[0] == "retention"]
+    n = [i for i, o in enumerate(olaylar) if o[0] == "backup"]
+    assert n, "node backup'ları hiç çağrılmadı (mock kurulumu bozuk)"
+    assert len(r) == beklenen, (
+        f"SYNC_RETENTION_ORDER={order!r}: {beklenen} retention beklenirdi, "
+        f"{len(r)} çağrıldı — retention açlığı regresyonu")
+    if order == "first":
+        assert r[0] < n[0], "first: retention node döngüsünden ÖNCE olmalı"
+    elif order == "last":
+        assert r[-1] > n[-1], "last: retention node döngüsünden SONRA olmalı"
+    else:
+        assert r[0] < n[0] and r[-1] > n[-1], (
+            "both/varsayılan: biri döngüden ÖNCE, biri SONRA olmalı "
+            "(3600 s bütçesi sonda kalan forget'i açlığa iter)")
+
+
+def test_retention_node_basina_degil_dongu_disinda(monkeypatch):
+    """DAVRANIŞ: node sayısı artınca retention çağrı sayısı ARTMAZ (döngü dışı)."""
+    iki = _retention_kos(monkeypatch, None, node_sayisi=2)
+    bez = _retention_kos(monkeypatch, None, node_sayisi=5)
+    r2 = sum(1 for o in iki if o[0] == "retention")
+    r5 = sum(1 for o in bez if o[0] == "retention")
+    assert r2 == r5 == 2, (
+        f"retention node başına çağrılıyor olabilir: 2 node→{r2}, 5 node→{r5} "
+        "(döngü dışında 2 olmalı)")
