@@ -1017,3 +1017,170 @@ def test_yazma_retry_dedektoru_normal_node_dongusune_takilmaz():
     assert _yazma_retry_donguleri(normal) == []
 
 
+# ─── v2.7.6 ÖLÇÜLMÜŞ İKİ KUSUR (16 Eyl 2026) ────────────────────────────────
+# K1) `run_cmd._exec` istisna yolunda metin yalnız `out`'a konuyor, `err` BOŞ
+#     bırakılıyordu → `_is_transient_rc()` kalıcı hataları `err`'den ayırt
+#     ettiği için KALICI istisna (rclone binary yok / izin reddi) geçici
+#     sanılıp retry ediliyordu. Ölçüm (fix ÖNCESİ, bu depo):
+#       run_cmd("rclone cat gdrive:x/y", retries=1) + FileNotFoundError
+#       → 3s bekleme + "sync hata: … rc=-1 0.0s retry=1/1"   (retry OLMAMALIYDI)
+#     Aynı hata sınıfı sync_common_knowledge._run_rclone'da DOĞRU yapılıyordu
+#     (err = str(e)) — iki yol artık tutarlı.
+# K2) `run_with_retry` koşulu `i < retries and A or B` → `(A and B) or B`:
+#     SON denemede 'timeout' içeren istisna yine retry dalına giriyor, döngü
+#     bitince fonksiyon **None** dönüyordu → istisna SESSİZCE YUTULUYORDU
+#     (fail-open) ve tanı 'retry 2/1' gibi yanıltıcı yazıyordu.
+#     Ölçüm (fix ÖNCESİ): run_with_retry(boom, retries=1) → returned=None,
+#     2 × 5s bekleme.
+
+def _fake_sub(monkeypatch, run_fn):
+    """subprocess.run'ı değiştir; TimeoutExpired GERÇEK sınıf kalır.
+
+    (Sadece `run` içeren bir namespace, `except subprocess.TimeoutExpired`
+    satırını AttributeError ile patlatıyordu — ölçüldü.)
+    """
+    monkeypatch.setattr(sm, "subprocess", types.SimpleNamespace(
+        run=run_fn, TimeoutExpired=subprocess.TimeoutExpired))
+
+
+def test_run_cmd_kalici_istisna_retry_etmez(monkeypatch, no_sleep):
+    """K1: rclone binary yok (FileNotFoundError) → KALICI → retry YOK."""
+    cagri = []
+
+    def patla(*a, **kw):
+        cagri.append(1)
+        raise FileNotFoundError(2, "No such file or directory", "rclone")
+
+    _fake_sub(monkeypatch, patla)
+    out, rc = sm.run_cmd("rclone cat gdrive:x/y", retries=1)
+    assert rc == -1
+    assert len(cagri) == 1, "kalıcı istisna retry edildi (K1 regresyonu)"
+    assert "No such file" in str(out)          # tanı kaybolmaz
+
+
+def test_run_cmd_gecici_istisna_retry_eder(monkeypatch, no_sleep):
+    """K1 regresyon kapısı: GEÇİCİ istisna retry almaya DEVAM eder."""
+    n = {"c": 0}
+
+    def gecici(*a, **kw):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return types.SimpleNamespace(stdout="ok", returncode=0, stderr="")
+
+    _fake_sub(monkeypatch, gecici)
+    out, rc = sm.run_cmd("rclone cat gdrive:x/y", retries=1)
+    assert (out, rc) == ("ok", 0)
+    assert n["c"] == 2
+
+
+def test_run_cmd_izin_reddi_istisnasi_retry_etmez(monkeypatch, no_sleep):
+    """K1: PermissionError de kalıcıdır (err artık sınıflandırıcıya gidiyor)."""
+    cagri = []
+
+    def patla(*a, **kw):
+        cagri.append(1)
+        raise PermissionError(13, "Permission denied")
+
+    _fake_sub(monkeypatch, patla)
+    _, rc = sm.run_cmd("rclone lsf gdrive:hub", retries=1)
+    assert rc == -1 and len(cagri) == 1
+
+
+def test_run_with_retry_gecici_istisnayi_yutmaz(monkeypatch, no_sleep):
+    """K2: son denemede bile istisna YÜKSELİR — asla None dönmez."""
+    def boom(*a, **kw):
+        raise TimeoutError("operation timeout")
+
+    with pytest.raises(TimeoutError):
+        sm.run_with_retry(boom, retries=1)
+
+
+def test_run_with_retry_kalici_istisnada_tek_deneme(monkeypatch, no_sleep):
+    """K2: kalıcı işaretli istisna İLK denemede yükselir (retry YOK)."""
+    cagri = {"n": 0}
+
+    def kalici(*a, **kw):
+        cagri["n"] += 1
+        raise PermissionError(13, "Permission denied")
+
+    with pytest.raises(PermissionError):
+        sm.run_with_retry(kalici, retries=2)
+    assert cagri["n"] == 1
+
+
+def test_run_with_retry_bilinmeyen_istisna_retry_etmez(monkeypatch, no_sleep):
+    """K2 fail-closed: tanınmayan hata sessizce retry edilmez, yükselir."""
+    cagri = {"n": 0}
+
+    def tuhaf(*a, **kw):
+        cagri["n"] += 1
+        raise ValueError("bozuk konfig")
+
+    with pytest.raises(ValueError):
+        sm.run_with_retry(tuhaf, retries=2)
+    assert cagri["n"] == 1
+
+
+def test_run_with_retry_basari_ve_gecici_sonrasi_basari(monkeypatch, no_sleep):
+    """Mutlu yol + geçici hatadan sonra başarı (sayaç doğru)."""
+    assert sm.run_with_retry(lambda x: x + 1, 41, retries=1) == 42
+
+    n = {"c": 0}
+
+    def bir_kere_gecici(*a, **kw):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return "tamam"
+
+    assert sm.run_with_retry(bir_kere_gecici, retries=1) == "tamam"
+    assert n["c"] == 2
+
+
+def test_istisna_yolu_iki_modulde_ayni_davranir(monkeypatch, no_sleep):
+    """K1 tutarlılık kapısı: sync_motor.run_cmd ↔ sync_common_knowledge.
+
+    İkisi de kalıcı istisnada retry ETMEMELİ (sapma tam burada oluşmuştu:
+    sck doğru, run_cmd yanlış — bu kapı iki yolun ayrışmasını engeller).
+    """
+    sm_cagri, ck_cagri = [], []
+
+    def sm_patla(*a, **kw):
+        sm_cagri.append(1)
+        raise FileNotFoundError(2, "No such file or directory", "rclone")
+
+    def ck_patla(*a, **kw):
+        ck_cagri.append(1)
+        raise FileNotFoundError(2, "No such file or directory", "rclone")
+
+    _fake_sub(monkeypatch, sm_patla)
+    sm.run_cmd("rclone cat gdrive:x/y", retries=1)
+    assert len(sm_cagri) == 1, "run_cmd kalıcı istisnayı retry etti"
+
+    monkeypatch.setattr(ck, "subprocess", types.SimpleNamespace(
+        run=ck_patla, TimeoutExpired=subprocess.TimeoutExpired))
+    ck._run_rclone(["cat", "gdrive:x/y"])
+    assert len(ck_cagri) == 1, "_run_rclone kalıcı istisnayı retry etti"
+
+
+def test_run_with_retry_oncelik_kapisi():
+    """K2 statik kapı: bozuk `and … or …` önceliği geri gelemez.
+
+    Ölçüm: eski satır `if i < retries and "Errno" in str(e) or …` —
+    `(A and B) or C` olarak çalışıp SON denemede istisnayı yutuyordu.
+    """
+    src = Path(sm.__file__).read_text(encoding="utf-8")
+    m = re.search(r"def run_with_retry\(.*?\n(?=def |\Z)", src, re.S)
+    assert m, "run_with_retry gövdesi bulunamadı"
+    # Yürütülebilir kod: docstring + yorum ayıklanır (kapı, kendi
+    # dokümantasyonunda alıntılanan eski satıra TAKILMAMALI — ölçüldü).
+    kod = re.sub(r'""".*?"""', "", m.group(0), flags=re.S)
+    kod = "\n".join(l for l in kod.splitlines()
+                    if not l.lstrip().startswith("#"))
+    assert 'and "Errno" in' not in kod, "bozuk öncelik ifadesi geri gelmiş"
+    assert re.search(r"\braise\b", kod), "istisna yükseltme yolu kayıp (yutma riski)"
+    assert "_RETRY_FATAL" in kod and "_RETRY_TRANSIENT" in kod, \
+        "sınıflandırma tek kaynaktan yapılmıyor (sapma riski)"
+
+

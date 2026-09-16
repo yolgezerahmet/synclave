@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.5"
+__version__ = "2.7.6"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -812,7 +812,16 @@ def run_cmd(cmd, timeout=60, shell=False, retries=0):
         except subprocess.TimeoutExpired:
             return "timeout", -1, f"TIMEOUT {timeout}s"
         except Exception as e:
-            return str(e), -1, ""
+            # v2.7.6 (ÖLÇÜLMÜŞ kusur, 16 Eyl 2026): istisna metni yalnız `out`'a
+            # konuyor, `err` BOŞ bırakılıyordu. `_is_transient_rc()` kalıcı
+            # hataları `err` üzerinden ayırt ettiği için KALICI istisnalar
+            # (rclone binary yok / izin reddi) geçici sanılıp retry ediliyordu.
+            # Ölçüm: subprocess.run FileNotFoundError → run_cmd("rclone cat …",
+            # retries=1) → 3s bekleme + "retry=1/1" logu (retry açılmamalıydı).
+            # Aynı hata sınıfı sync_common_knowledge._run_rclone'da DOĞRU
+            # yapılıyordu (err = str(e)) — iki yol artık tutarlı.
+            # Dış sözleşme değişmez: run_cmd yalnız (out, rc) döndürür.
+            return str(e), -1, str(e)
 
     cmd_text = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
     can_retry = _is_idempotent_read(cmd_text)
@@ -2420,16 +2429,34 @@ def save_last_push(cfg, node, fp):
     json.dump(d, open(_state_path(cfg), "w", encoding="utf-8"), ensure_ascii=False)
 
 def run_with_retry(fn, *a, retries=1, **kw):
-    """Geçici ağ hatalarında 1 retry — otonom dayanıklılık."""
+    """Geçici ağ hatalarında 1 retry — otonom dayanıklılık.
+
+    v2.7.6 (ÖLÇÜLMÜŞ kusur, 16 Eyl 2026): koşul
+    `i < retries and "Errno" in str(e) or "timeout" in str(e).lower()` idi.
+    Operatör önceliği `(i < retries and A) or B` olduğundan, SON denemede
+    (i == retries) 'timeout' içeren bir istisna YİNE retry dalına giriyordu:
+    5s uyku → döngü biter → fonksiyon **None döner**, yani istisna
+    SESSİZCE YUTULUR (fail-open) ve tanı 'retry 2/1' gibi yanıltıcı yazılır.
+    Ölçüm: `run_with_retry(boom, retries=1)` (TimeoutError) → returned=None,
+    2 × 5s bekleme.
+    Düzeltme: sınıflandırma tek kaynaktan (_RETRY_FATAL/_RETRY_TRANSIENT),
+    - kalıcı işaretli istisna  → ilk denemede yükselir (retry YOK),
+    - geçici (ağ/timeout) işaretli istisna → en çok `retries` kez denenir,
+    - bilinmeyen istisna → YÜKSELİR (fail-closed; sessiz retry yok).
+    Her durumda son denemede istisna yükselir — asla None dönmez.
+    """
     for i in range(retries + 1):
         try:
             return fn(*a, **kw)
         except Exception as e:
-            if i < retries and "Errno" in str(e) or "timeout" in str(e).lower():
+            metin = str(e).lower()
+            kalici = any(m in metin for m in _RETRY_FATAL)
+            gecici = any(m in metin for m in _RETRY_TRANSIENT)
+            if i < retries and gecici and not kalici:
                 print(f"    ⏳ geçici hata ({e}) — retry {i+1}/{retries}")
                 time.sleep(5)
-            else:
-                raise
+                continue
+            raise
 
 def cmd_agent_status(cfg, json_mode=False):
     """Hermes agent/otonom cron için JSON durum + öneri."""

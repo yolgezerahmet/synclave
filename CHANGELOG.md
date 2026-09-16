@@ -1,5 +1,33 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.6] — 2026-09-16 (retry: iki ÖLÇÜLMÜŞ kusur — kalıcı istisna retry'i + istisna yutma)
+
+- **fix: `run_cmd` istisna yolunda tanı `err`'e de yazılır (`_exec`).**
+  İstisna metni yalnız `out`'a konuyor, `err` BOŞ bırakılıyordu. `_is_transient_rc()`
+  kalıcı hataları `err` üzerinden ayırt ettiği için KALICI istisnalar (rclone binary
+  yok / izin reddi) geçici sanılıp retry ediliyordu. Ölçüm (fix ÖNCESİ, bu depo):
+  `run_cmd("rclone cat gdrive:x/y", retries=1)` + `FileNotFoundError`
+  → 3s bekleme + `sync hata: … rc=-1 0.0s retry=1/1` (retry açılmamalıydı).
+  Aynı hata sınıfı `sync_common_knowledge._run_rclone`'da DOĞRU yapılıyordu
+  (`err = str(e)`) — iki yol artık tutarlı; kapı:
+  `tests/test_retry.py::test_istisna_yolu_iki_modulde_ayni_davranir`.
+  Dış sözleşme DEĞİŞMEZ (`run_cmd` yalnız `(out, rc)` döndürür).
+- **fix: `run_with_retry` istisnayı YUTMUYOR (operatör önceliği).**
+  Koşul `i < retries and "Errno" in str(e) or "timeout" in str(e).lower()` idi →
+  `(A and B) or C`: SON denemede `timeout` içeren istisna yine retry dalına giriyor,
+  döngü bitince fonksiyon **None** dönüyordu (fail-open) ve tanı `retry 2/1` gibi
+  yanıltıcı yazıyordu. Ölçüm (fix ÖNCESİ): `run_with_retry(boom, retries=1)`
+  → `returned=None`, 2 × 5s bekleme. Düzeltme: sınıflandırma tek kaynaktan
+  (`_RETRY_FATAL` / `_RETRY_TRANSIENT`) — kalıcı işaretli istisna İLK denemede,
+  bilinmeyen istisna da anında yükselir (fail-closed), geçici işaretli istisna en
+  çok `retries` kez denenir ve son denemede YÜKSELİR; asla `None` dönmez.
+  Statik kapı: `tests/test_retry.py::test_run_with_retry_oncelik_kapisi`.
+- **test: 9 yeni regresyon testi** (kalıcı/geçici istisna ayrımı, izin reddi,
+  yutma yasağı, bilinmeyen istisna fail-closed, mutlu yol, iki modül tutarlılık
+  kapısı, öncelik statik kapısı). Toplam: 413 → 422.
+- **not: yazmaya retry politikası DEĞİŞMEDİ** (v2.1.1'den beri: yalnız idempotent
+  okumalar; `copy/copyto/move/sync/delete/...` ASLA retry).
+
 ## [2.7.5] — 2026-09-15 (retention node döngüsünden ÖNCE de çalışır — defense-in-depth)
 
 - **feat: `_restic_retention(cfg, dry_run)` ayrıştırıldı + `SYNC_RETENTION_ORDER`
