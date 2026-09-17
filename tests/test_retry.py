@@ -1285,6 +1285,30 @@ def test_rclone_durum_rc127_yok_sayilir(monkeypatch, no_sleep):
     assert len(calls) == 1
 
 
+def test_erisilebilirlik_probe_timeout_kisaltilmadi():
+    """Eski çağrı 60s varsayılanındaydı → yoklama timeout'u KISALTILAMAZ.
+
+    Kısaltma (30s gibi) yük altındaki makinede yanlış "rclone yok" negatifini
+    geri getirirdi; bu kapı değerin sessizce düşürülmesini engeller.
+    """
+    assert sm._RCLONE_PROBE_TIMEOUT >= 60
+    assert sm._RCLONE_PROBE_TIMEOUT < 180        # yoklama, veri okuması değil
+
+
+def test_rclone_durum_probe_timeoutunu_gonderir(monkeypatch, no_sleep):
+    """Yoklama, sabit timeout'u rclone_read'e AYNEN geçirir (sessiz varsayılan yok)."""
+    gorulen = {}
+
+    def fake(cmd_args, capture_output=True, text=True, errors="replace",
+             timeout=60, **kw):
+        gorulen["timeout"] = timeout
+        return _FakeResult(0, "rclone v1.60.1", "")
+
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_durum() == "ok"
+    assert gorulen["timeout"] == sm._RCLONE_PROBE_TIMEOUT
+
+
 def test_doctor_gdrive_sorgulanamazsa_yok_demez(monkeypatch, capsys, tmp_path,
                                                 no_sleep):
     """Geçici hatada doctor 'GDrive remote YOK' DEMEZ → 'sorgulanamadı' + rc=1."""

@@ -1238,6 +1238,14 @@ def _gh_token():
 # GDRIVE (BÜYÜK DOSYALAR, VERSİYONLU)
 # ═══════════════════════════════════════════════════════════════
 
+# Erişilebilirlik yoklaması timeout'u (v2.7.9). Eski `run_cmd("rclone version")`
+# çağrısının varsayılanı 60s idi; KISALTILMADI — kısaltmak yanlış "rclone yok"
+# negatifini geri getirirdi. Veri okumaları (lsf/lsf/cat) spec gereği 180s'tir
+# (rclone_read varsayılanı); bu yalnız "çalışıyor mu?" yoklamasıdır, retry ile
+# en kötü durum ~123s. Kapı: test_erisilebilirlik_probe_timeout_kisaltilmadi.
+_RCLONE_PROBE_TIMEOUT = 60
+
+
 def rclone_durum():
     """rclone erişilebilirliği — ÜÇ DURUM: 'ok' | 'yok' | 'belirsiz'.
 
@@ -1248,9 +1256,15 @@ def rclone_durum():
     yapılmaz); ayrım yalnız TANI içindir: doctor 'GDrive remote YOK' demek
     yerine 'sorgulanamadı' diyebilsin, log 'yok' ile 'geçici hata'yı karıştırmasın.
 
+    Timeout: `_RCLONE_PROBE_TIMEOUT` (60s) — eski `run_cmd("rclone version")`
+    varsayılanıydı; KISALTILMADI, çünkü kısaltmak yanlış 'yok' negatifini geri
+    getirirdi (kapı: test_erisilebilirlik_probe_timeout_kisaltilmadi). Veri
+    okumaları (lsf/cat/…) spec gereği 180s'tir; bu yalnız erişilebilirlik
+    yoklamasıdır ve retry ile en kötü durum ~123s'dir.
+
     Dönüş: 'ok' | 'yok' | 'belirsiz'
     """
-    rc, out, err = rclone_read(["version"], timeout=30)
+    rc, out, err = rclone_read(["version"], timeout=_RCLONE_PROBE_TIMEOUT)
     if rc == 0:
         return "ok"
     blob = f"{err} {out}".lower()
@@ -2400,7 +2414,7 @@ def cmd_doctor(cfg):
     # 3. GDrive remote — OKUMA yolu (retry'li). v2.7.9: 'tanımlı değil' ile
     # 'sorgulanamadı' AYRI raporlanır; eskiden geçici bir hatada sahte
     # 'GDrive remote YOK' yazılıyordu (retries=0, shell=True).
-    rc_ls, out_ls, _err_ls = rclone_read(["listremotes"], timeout=30)
+    rc_ls, out_ls, _err_ls = rclone_read(["listremotes"], timeout=60)
     if rc_ls != 0:
         print(f"\n  ❓ GDrive remote (rclone): sorgulanamadı "
               f"(rc={rc_ls}, retry sonrası — geçici hata olabilir)")

@@ -28,13 +28,23 @@
   `rclone_read(["listremotes"])` (retry=1, shell yok); rc≠0 ise
   "❓ GDrive remote (rclone): sorgulanamadı (rc=…, retry sonrası — geçici hata
   olabilir)" basılır ve doctor rc=1 kalır (fail-closed).
-- **test: `tests/test_retry.py` 119 → 131** — 12 yeni test: sınıflandırma
+- **fix (yoklama timeout'u): `_RCLONE_PROBE_TIMEOUT = 60` KISALTILMADI.**
+  Eski `run_cmd("rclone version")` çağrısının varsayılanı 60s idi; yoklamayı
+  30s'e çekmek yük altındaki makinede yanlış "rclone yok" negatifini geri
+  getirirdi. Veri okumaları (lsf/cat/…) spec gereği 180s kalır; bu yalnız
+  "çalışıyor mu?" yoklamasıdır (retry ile en kötü durum ~123s). Doctor'daki
+  `listremotes` okuması da 30s → 60s'e çıkarıldı (aynı gerekçe). Kapı:
+  `test_erisilebilirlik_probe_timeout_kisaltilmadi`,
+  `test_rclone_durum_probe_timeoutunu_gonderir`.
+- **test: `tests/test_retry.py` 119 → 133** — 14 yeni test: sınıflandırma
   (`version` okuma / yazmada veto), üç durum (ok / belirsiz / yok), retry
-  sayısı ölçümü (geçici → 2 deneme, kalıcı → 1), doctor iki dal (sorgulanamadı
-  ↔ gerçek YOK) ve **AST kapısı**
+  sayısı ölçümü (geçici → 2 deneme, kalıcı → 1), yoklama timeout sözleşmesi,
+  doctor iki dal (sorgulanamadı ↔ gerçek YOK) ve **AST kapısı**
   `test_rclone_okuma_cagri_yerleri_retry_ister`: `run_cmd` ile çağrılan bir
   rclone OKUMA komutu `retries=1` taşımıyorsa kırmızı — bu kusur sınıfının
-  yapısal tekrarını engeller (yazma komutları muaf).
+  yapısal tekrarını engeller (yazma komutları muaf). AST kapısının kendisi
+  MUTASYON ile kanıtlandı: `retries=1` kaldırıldığında kapı kırmızı
+  (`[(1662, 'rclone lsd x/x')]`), geri alındığında yeşil.
 - **not:** politika kapsamı DEĞİŞMEDİ — yazma komutlarına (copy/copyto/
   backup/push) retry ASLA yok; çift yazma/kısmi durum riski fail-closed
   korunur. Değişen yalnız OKUMA dayanıklılığıdır.
