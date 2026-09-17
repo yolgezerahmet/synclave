@@ -121,8 +121,11 @@ def _hub_base(user: Optional[str] = None) -> str:
 # Hepsi yan etkisiz SORGUDUR (dosya okuma, dizin listeleme, iş durumu,
 # bağlantı/kuota kontrolü) — retry güvenlidir. Yazma komutları bu kümeye
 # ASLA girmez (çift yazma/kısmi durum riski fail-closed korunur).
+# v2.7.9: `version` eklendi — sync_motor._RETRY_READ_TOKENS ile BİREBİR
+# eşitlik zorunlu (drift kapısı: test_okuma_kumeleri_kume_olarak_esit).
+# Salt-okuma/yan etkisiz sorgu; yazma yolu retry almaz (fail-closed korunur).
 _RCLONE_READ_COMMANDS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
-                         "listremotes", "direxists", "about"}
+                         "listremotes", "direxists", "about", "version"}
 _HTTP_5XX_RE = re.compile(r"\b5\d\d\b")
 _NET_MARKERS = (
     "connection reset",

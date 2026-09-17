@@ -73,7 +73,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import sync_memory as smem
 
-__version__ = "2.7.8"
+__version__ = "2.7.9"
 __author__ = "CumulusNET Engineering"
 __license__ = "MIT"
 
@@ -654,8 +654,13 @@ def gh_available():
 # run_cmd'de retry YALNIZCA idempotent OKUMA komutlarına uygulanır
 # (cat/lsf/lsjson/lsd/status). Yazma komutlarına (copy/copyto/backup)
 # ASLA retry YOK — çift yazma/kısmi durum fail-closed korunur.
+# v2.7.9 (ölçülmüş kusur, 17 Eyl 2026): `version` kümede DEĞİLDİ →
+# `_is_idempotent_read("rclone version")` False → rclone_available() hiç retry
+# alamıyordu ve geçici bir hata GDrive kanalını sessizce kapatıyordu
+# (bkz. rclone_available docstring). Salt-okuma ve yan etkisizdir; yazma
+# veto'su okumadan ÖNCE geldiği için 'rclone copy version dest' yine RED.
 _RETRY_READ_TOKENS = {"cat", "lsf", "lsjson", "lsd", "status", "ping",
-                      "listremotes", "direxists", "about"}
+                      "listremotes", "direxists", "about", "version"}
 # Yazma alt-komutları — dosya adı okuma kelimesine benzese bile (örn.
 # 'rclone copy status <dest>') asla retry açılmaz (çift yazma fail-closed).
 # v2.6.2 (13 Eyl 2026 — ÖLÇÜLMÜŞ kaçak): küme eksikti; adı listede olmayan
@@ -1233,9 +1238,44 @@ def _gh_token():
 # GDRIVE (BÜYÜK DOSYALAR, VERSİYONLU)
 # ═══════════════════════════════════════════════════════════════
 
+def rclone_durum():
+    """rclone erişilebilirliği — ÜÇ DURUM: 'ok' | 'yok' | 'belirsiz'.
+
+    Neden üçlü (bağımsız denetim önerisi, 17 Eyl 2026): 'yok' KALICI bir
+    durumdur (binary yok / çalıştırılamıyor), 'belirsiz' ise sorgunun geçici
+    hata ile düştüğü — retry'in TÜKENDİĞİ — durumdur; sonuç BİLİNMİYOR.
+    İkisi de çağırıcıda fail-closed davranır (GDrive işlemi atlanır, yazma
+    yapılmaz); ayrım yalnız TANI içindir: doctor 'GDrive remote YOK' demek
+    yerine 'sorgulanamadı' diyebilsin, log 'yok' ile 'geçici hata'yı karıştırmasın.
+
+    Dönüş: 'ok' | 'yok' | 'belirsiz'
+    """
+    rc, out, err = rclone_read(["version"], timeout=30)
+    if rc == 0:
+        return "ok"
+    blob = f"{err} {out}".lower()
+    if any(m in blob for m in _RETRY_FATAL) or rc == 127:
+        return "yok"
+    return "belirsiz"
+
+
 def rclone_available():
-    out, rc = run_cmd("rclone version")
-    return rc == 0
+    """rclone kullanılabilir mi — 'ok' DIŞINDAKİ her durum fail-closed (False).
+
+    v2.7.9 (ÖLÇÜLMÜŞ kusur, 17 Eyl 2026): eski hali `run_cmd("rclone version")`
+    çağırıyordu; `version` retry OKUMA kümesinde olmadığı için
+    (`_is_idempotent_read("rclone version")` → False) ne retry ne de uzun
+    timeout alıyordu (varsayılan 60s). Ölçüm (fix ÖNCESİ, bu depo):
+      run_cmd("rclone version") → retries=0, timeout=60,
+      _is_idempotent_read("rclone version") → False.
+    Sonuç: geçici bir hata (yük altında fork/exec gecikmesi, AV taraması,
+    anlık rc≠0) 'rclone yok' sanılıyor; gdrive_snapshot 'rclone yok — GDrive
+    snapshot atlandı' deyip ATLIYOR, gdrive_pull_latest False dönüyordu —
+    yani GDrive kanalı sessizce kapanıyordu. Artık retry'li rclone_read
+    (1 retry / 3s) + üç durumlu tanı kullanılır; karar değişmezi AYNI:
+    'ok' değilse kullanılabilir sayılmaz (fail-closed).
+    """
+    return rclone_durum() == "ok"
 
 
 def _pack_node(base, pkg, include, exclude_dirs, limit=5000):
@@ -1279,8 +1319,11 @@ def gdrive_snapshot(cfg, node=None):
     Per-node klasör: versiyonlu/<node>/<timestamp>/
     Üzerine ASLA yazmaz — her seferinde yeni timestamp klasörü.
     """
-    if not rclone_available():
-        log.warning("rclone yok — GDrive snapshot atlandı")
+    durum = rclone_durum()
+    if durum != "ok":
+        log.warning(
+            "rclone yok — GDrive snapshot atlandı" if durum == "yok" else
+            "rclone durumu belirlenemedi (geçici hata) — GDrive snapshot atlandı")
         return None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1723,8 +1766,11 @@ def gdrive_pull_latest(cfg, node):
     GDrive'dan node'un EN SON versiyonunu çek ve doğrula.
     Non-destructive: hedef dizine yazar ama çakışan dosyalar .conflict.TS.
     """
-    if not rclone_available():
-        log.warning("rclone yok — GDrive pull atlandı")
+    durum = rclone_durum()
+    if durum != "ok":
+        log.warning(
+            "rclone yok — GDrive pull atlandı" if durum == "yok" else
+            "rclone durumu belirlenemedi (geçici hata) — GDrive pull atlandı")
         return False
 
     # En son versiyon klasörünü bul — pipeline YOK: rc GERÇEK rclone rc'si.
@@ -2351,13 +2397,20 @@ def cmd_doctor(cfg):
             if not exists:
                 ok = False
 
-    # 3. GDrive remote
-    out, rc = run_cmd("rclone listremotes", timeout=30, shell=True)
-    gdrive = "gdrive:" in (out or "")
-    print(f"\n  {'✅' if gdrive else '❌'} GDrive remote (rclone): "
-          f"{'tanımlı' if gdrive else 'YOK'}")
-    if not gdrive:
+    # 3. GDrive remote — OKUMA yolu (retry'li). v2.7.9: 'tanımlı değil' ile
+    # 'sorgulanamadı' AYRI raporlanır; eskiden geçici bir hatada sahte
+    # 'GDrive remote YOK' yazılıyordu (retries=0, shell=True).
+    rc_ls, out_ls, _err_ls = rclone_read(["listremotes"], timeout=30)
+    if rc_ls != 0:
+        print(f"\n  ❓ GDrive remote (rclone): sorgulanamadı "
+              f"(rc={rc_ls}, retry sonrası — geçici hata olabilir)")
         ok = False
+    else:
+        gdrive = "gdrive:" in (out_ls or "")
+        print(f"\n  {'✅' if gdrive else '❌'} GDrive remote (rclone): "
+              f"{'tanımlı' if gdrive else 'YOK'}")
+        if not gdrive:
+            ok = False
 
     # 4. GitHub repo erişimi
     repo = cfg.get("github", {}).get("repo", "")

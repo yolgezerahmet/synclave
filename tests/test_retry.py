@@ -575,7 +575,7 @@ def test_rclone_read_permission_denied_no_retry(monkeypatch, no_sleep):
 # ama 'about'/'direxists'/'ping' eklendiğinde retry kaybı doğururdu.
 
 _OKUMA_ALT_KOMUTLAR = ["cat", "lsf", "lsjson", "lsd", "status", "ping",
-                       "listremotes", "direxists", "about"]
+                       "listremotes", "direxists", "about", "version"]
 _YAZMA_ALT_KOMUTLAR = ["copy", "copyto", "move", "sync", "mkdir", "delete",
                        "purge", "backup", "push", "restore", "upload", "rm"]
 
@@ -1205,5 +1205,152 @@ def test_kalici_veto_tum_rc_degerlerinde_gecerli():
     assert sm._is_transient_rc(-1, "connection reset by peer")
     assert sm._is_transient_rc(-1, "")
     assert not sm._is_transient_rc(1, "directory not found")
+
+
+# ─── v2.7.9: rclone_available ÜÇ DURUM + retry (ÖLÇÜLMÜŞ kusur) ──────────
+# ÖLÇÜM (fix ÖNCESİ, bu depo):
+#   _is_idempotent_read("rclone version")             → False (kümede yoktu)
+#   rclone_available() → run_cmd("rclone version")    → retries=0, timeout=60
+#   doctor → run_cmd("rclone listremotes", timeout=30, shell=True) → retries=0
+# Etki: GEÇİCİ hata 'rclone yok' sanılıyordu → gdrive_snapshot "rclone yok —
+# GDrive snapshot atlandı" deyip ATLIYOR, gdrive_pull_latest False dönüyordu
+# (GDrive kanalı sessizce kapanır); doctor sahte "GDrive remote YOK" yazıyordu.
+
+
+def test_version_idempotent_okuma_sinifinda():
+    assert sm._is_idempotent_read("rclone version") is True
+    assert ck._is_rclone_read(["version"]) is True
+
+
+@pytest.mark.parametrize("cmd", [
+    "rclone copy version gdrive:a gdrive:b",
+    "rclone moveto version gdrive:a gdrive:b",
+    "rclone deletefile version gdrive:a",
+])
+def test_version_yazma_vetosunu_gecemez(cmd):
+    """'version' argümanı taşıyan YAZMA komutları retry almaz (veto önce)."""
+    assert sm._is_idempotent_read(cmd) is False
+    assert ck._is_rclone_read(cmd.split()[1:]) is False
+
+
+def test_rclone_durum_gecici_hatada_belirsiz_ve_fail_closed(monkeypatch, no_sleep):
+    """Retry tükendi + geçici hata → 'belirsiz' ve kullanılabilir DEĞİL."""
+    calls = []
+    fake = _make_fake_run([(1, "", "connection reset by peer")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_durum() == "belirsiz"
+    assert len(calls) == 2                      # TEK çağrı: 1 deneme + 1 retry
+    assert calls[0][:2] == ["rclone", "version"]
+    assert sm.rclone_available() is False       # ayrı çağrı → yine fail-closed
+    assert len(calls) == 4
+
+
+def test_rclone_durum_gecici_hatada_retry_ile_ok(monkeypatch, no_sleep):
+    """Geçici hata → retry → başarı: GDrive kanalı artık sessizce kapanmaz."""
+    calls = []
+    fake = _make_fake_run([(1, "", "i/o timeout"), (0, "rclone v1.60.1", "")],
+                          calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_durum() == "ok"
+    assert len(calls) == 2                      # 1 deneme + 1 retry (tek çağrı)
+
+
+def test_rclone_available_ok_ise_true(monkeypatch, no_sleep):
+    """rclone_available = (durum == 'ok') — başarıda tek çağrı, True."""
+    calls = []
+    fake = _make_fake_run([(0, "rclone v1.60.1", "")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_available() is True
+    assert len(calls) == 1
+
+
+def test_rclone_durum_yoksa_tek_deneme(monkeypatch, no_sleep):
+    """KALICI yokluk (binary yok) retry ETMEZ; 'belirsiz'den AYRI raporlanır."""
+    calls = []
+    fake = _make_fake_run(
+        [(-1, "", "[Errno 2] No such file or directory: 'rclone'")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_durum() == "yok"
+    assert len(calls) == 1                      # KALICI → retry YOK
+    assert sm.rclone_available() is False
+    assert len(calls) == 2
+
+
+def test_rclone_durum_rc127_yok_sayilir(monkeypatch, no_sleep):
+    """rc=127 (komut yok) KALICI kabul edilir — tek deneme, 'yok'."""
+    calls = []
+    fake = _make_fake_run([(127, "", "")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    assert sm.rclone_durum() == "yok"
+    assert len(calls) == 1
+
+
+def test_doctor_gdrive_sorgulanamazsa_yok_demez(monkeypatch, capsys, tmp_path,
+                                                no_sleep):
+    """Geçici hatada doctor 'GDrive remote YOK' DEMEZ → 'sorgulanamadı' + rc=1."""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda ad: f"/usr/bin/{ad}")
+    calls = []
+    fake = _make_fake_run([(1, "", "connection refused")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    cfg = {"dirs": {"kernel": {"path": str(tmp_path)}}, "github": {}}
+    rc = sm.cmd_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "GDrive remote (rclone): sorgulanamadı" in out
+    assert "GDrive remote (rclone): YOK" not in out
+    assert rc == 1
+    assert len(calls) == 2                      # listremotes: retry'li okuma
+
+
+def test_doctor_gdrive_remote_gercekten_yoksa_yok_der(monkeypatch, capsys,
+                                                      tmp_path, no_sleep):
+    """rc=0 + liste boş → GERÇEK yokluk: 'YOK' raporu korunur."""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda ad: f"/usr/bin/{ad}")
+    calls = []
+    fake = _make_fake_run([(0, "remote1:\nremote2:\n", "")], calls)
+    _patch_subprocess(monkeypatch, sm, fake)
+    cfg = {"dirs": {"kernel": {"path": str(tmp_path)}}, "github": {}}
+    rc = sm.cmd_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "GDrive remote (rclone): YOK" in out
+    assert rc == 1
+
+
+def test_rclone_okuma_cagri_yerleri_retry_ister():
+    """AST kapısı: rclone OKUMA komutları run_cmd ile retries'siz çağrılamaz.
+
+    v2.7.9'da kapatılan kusur tam olarak buydu: okuma komutu run_cmd ile
+    (retries'siz) çağrılıyordu. Yeni bir okuma çağrı yeri eklenirse ya
+    rclone_read kullanılmalı ya retries=1 verilmeli; yazma komutları muaf
+    (onlara retry zaten YASAK).
+    """
+    import ast
+    kok = Path(__file__).resolve().parent.parent / "sync_motor.py"
+    tree = ast.parse(kok.read_text(encoding="utf-8"))
+    ihlal = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "run_cmd"):
+            continue
+        if not node.args:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            metin = arg.value
+        elif isinstance(arg, ast.JoinedStr):
+            metin = "".join(v.value if isinstance(v, ast.Constant) else "x"
+                            for v in arg.values)
+        else:
+            continue
+        if "rclone" not in metin:
+            continue
+        if not sm._is_idempotent_read(metin):   # yazma → retry zaten yasak
+            continue
+        kw = {k.arg: k for k in node.keywords}
+        r = kw.get("retries")
+        if not (r and isinstance(r.value, ast.Constant) and r.value.value >= 1):
+            ihlal.append((node.lineno, metin[:70]))
+    assert not ihlal, f"retry'siz rclone OKUMA çağrı yeri: {ihlal}"
 
 

@@ -1,5 +1,44 @@
 # CHANGELOG — Synclave (eski ad: hermes-sync)
 
+## [2.7.9] — 2026-09-17 (fix: geçici rclone hatası "rclone yok" sanılıp GDrive kanalını SESSİZCE kapatıyordu)
+
+- **fix (`sync_motor.rclone_available`): erişilebilirlik kontrolü artık
+  retry'li OKUMA yolundan geçer ve ÜÇ DURUMLU tanı döner.** Eski hali
+  `run_cmd("rclone version")` çağırıyordu; `version` retry OKUMA kümesinde
+  OLMADIĞI için ne retry ne de uzun timeout alıyordu. ÖLÇÜM (fix ÖNCESİ, bu
+  depo): `_is_idempotent_read("rclone version")` → **False**;
+  `rclone_available()` → `run_cmd("rclone version")` → **retries=0,
+  timeout=60** (varsayılan). Sonuç: geçici bir hata (yük altında fork/exec
+  gecikmesi, AV taraması, anlık rc≠0) "rclone yok" sanılıyor →
+  `gdrive_snapshot` "rclone yok — GDrive snapshot atlandı" deyip ATLIYOR,
+  `gdrive_pull_latest` False dönüyordu; yani **GDrive kanalı sessizce
+  kapanıyordu**. Yeni `rclone_durum()`: `'ok' | 'yok' | 'belirsiz'` — `'yok'`
+  KALICI (binary yok / rc=127 / "no such file"), `'belirsiz'` GEÇİCİ (retry
+  tükendi, rc≠0 + ağ işareti). `rclone_available()` = `durum == "ok"` → karar
+  değişmezi AYNI (fail-closed: `'ok'` değilse GDrive işlemi atlanır, yazma
+  yapılmaz); ayrım yalnız TANI içindir.
+- **fix (`_RETRY_READ_TOKENS` / `_RCLONE_READ_COMMANDS`): `version` okuma
+  kümesine eklendi** (iki sınıflandırıcıda BİREBİR — drift kapısı
+  `test_okuma_kumeleri_kume_olarak_esit`). Yazma veto'su okumadan ÖNCE
+  geldiği için `rclone copy version dest` gibi komutlar retry ALMAZ
+  (fail-closed korunur; kapı: `test_version_yazma_vetosunu_gecemez`).
+- **fix (`cmd_doctor`): "GDrive remote YOK" ile "sorgulanamadı" ayrıldı.**
+  Doctor okuması `run_cmd("rclone listremotes", timeout=30, shell=True)`
+  (retries=0) idi → geçici hatada SAHTE "GDrive remote YOK" yazıyordu. Artık
+  `rclone_read(["listremotes"])` (retry=1, shell yok); rc≠0 ise
+  "❓ GDrive remote (rclone): sorgulanamadı (rc=…, retry sonrası — geçici hata
+  olabilir)" basılır ve doctor rc=1 kalır (fail-closed).
+- **test: `tests/test_retry.py` 119 → 131** — 12 yeni test: sınıflandırma
+  (`version` okuma / yazmada veto), üç durum (ok / belirsiz / yok), retry
+  sayısı ölçümü (geçici → 2 deneme, kalıcı → 1), doctor iki dal (sorgulanamadı
+  ↔ gerçek YOK) ve **AST kapısı**
+  `test_rclone_okuma_cagri_yerleri_retry_ister`: `run_cmd` ile çağrılan bir
+  rclone OKUMA komutu `retries=1` taşımıyorsa kırmızı — bu kusur sınıfının
+  yapısal tekrarını engeller (yazma komutları muaf).
+- **not:** politika kapsamı DEĞİŞMEDİ — yazma komutlarına (copy/copyto/
+  backup/push) retry ASLA yok; çift yazma/kısmi durum riski fail-closed
+  korunur. Değişen yalnız OKUMA dayanıklılığıdır.
+
 ## [2.7.8] — 2026-09-17 (fix: tanınmayan retention knob değeri retention'ı SESSİZCE kapatıyordu — fail-safe)
 
 - **fix (`sync_motor.cmd_restic_backup`): `SYNC_RETENTION_ORDER` knobu artık
