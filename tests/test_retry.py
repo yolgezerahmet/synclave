@@ -1309,6 +1309,22 @@ def test_rclone_durum_probe_timeoutunu_gonderir(monkeypatch, no_sleep):
     assert gorulen["timeout"] == sm._RCLONE_PROBE_TIMEOUT
 
 
+def test_rclone_durum_siniflandirma_sapmasinda_cokmez(monkeypatch, caplog):
+    """Savunma: okuma sınıflandırması bozulursa yoklama ÇÖKMEZ → 'belirsiz'.
+
+    rclone_read, okuma kümesinde olmayan bir komutu ValueError ile reddeder.
+    'version' sessizce kümeden çıkarsa bu istisna sync koşusunu çökertirdi;
+    bunun yerine yüksek sesle loglanır ve fail-closed 'belirsiz' döner.
+    """
+    def patlat(*a, **kw):
+        raise ValueError("rclone_read yalnız idempotent OKUMA komutları içindir")
+
+    monkeypatch.setattr(sm, "rclone_read", patlat)
+    with caplog.at_level("ERROR"):
+        assert sm.rclone_durum() == "belirsiz"
+    assert "sınıflandırma sapması" in caplog.text
+
+
 def test_doctor_gdrive_sorgulanamazsa_yok_demez(monkeypatch, capsys, tmp_path,
                                                 no_sleep):
     """Geçici hatada doctor 'GDrive remote YOK' DEMEZ → 'sorgulanamadı' + rc=1."""

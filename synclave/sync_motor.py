@@ -1264,7 +1264,17 @@ def rclone_durum():
 
     Dönüş: 'ok' | 'yok' | 'belirsiz'
     """
-    rc, out, err = rclone_read(["version"], timeout=_RCLONE_PROBE_TIMEOUT)
+    try:
+        rc, out, err = rclone_read(["version"], timeout=_RCLONE_PROBE_TIMEOUT)
+    except ValueError as e:
+        # Savunma (fail-closed): rclone_read yalnız OKUMA sınıfı kabul eder.
+        # 'version' okuma kümesinden sessizce çıkarsa çağrı ValueError ile
+        # PATLARDI ve sync koşusu çökerdi; bunun yerine yüksek sesle loglanır ve
+        # 'belirsiz' dönülür → GDrive adımı atlanır (kapı:
+        # test_version_idempotent_okuma_sinifinda + test_rclone_durum_
+        # siniflandirma_sapmasinda_cokmez).
+        log.error(f"rclone durum yoklaması reddedildi (sınıflandırma sapması): {e}")
+        return "belirsiz"
     if rc == 0:
         return "ok"
     blob = f"{err} {out}".lower()

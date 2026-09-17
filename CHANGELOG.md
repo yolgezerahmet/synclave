@@ -36,7 +36,12 @@
   `listremotes` okuması da 30s → 60s'e çıkarıldı (aynı gerekçe). Kapı:
   `test_erisilebilirlik_probe_timeout_kisaltilmadi`,
   `test_rclone_durum_probe_timeoutunu_gonderir`.
-- **test: `tests/test_retry.py` 119 → 133** — 14 yeni test: sınıflandırma
+- **fix (savunma): `rclone_durum()` sınıflandırma sapmasında ÇÖKMEZ.** `rclone_read`
+  okuma kümesinde olmayan komutu `ValueError` ile reddeder; `version` sessizce
+  kümeden çıkarsa bu istisna sync koşusunu çökertirdi. Artık yüksek sesle
+  (`log.error`) raporlanır ve fail-closed `'belirsiz'` döner. Kapı:
+  `test_rclone_durum_siniflandirma_sapmasinda_cokmez`.
+- **test: `tests/test_retry.py` 119 → 134** — 15 yeni test: sınıflandırma
   (`version` okuma / yazmada veto), üç durum (ok / belirsiz / yok), retry
   sayısı ölçümü (geçici → 2 deneme, kalıcı → 1), yoklama timeout sözleşmesi,
   doctor iki dal (sorgulanamadı ↔ gerçek YOK) ve **AST kapısı**
