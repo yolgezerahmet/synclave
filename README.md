@@ -7,6 +7,51 @@ Non-destructive, versiyonlu, sınırsız node. **MIT** lisansı.
 > Özel CumulusNET kopyası: `cumulus-sync-motor` (private). Bu repo (public) evrensel
 > Hermes/OpenClaw kullanımı içindir.
 
+## Kurulum (PyPI)
+
+```bash
+pip install synclave                       # PyPI — v2.7.9
+synclave status                            # JSON durum (synclave status --json)
+synclave init                              # ilk config
+synclave both --skip-unchanged             # push + pull
+synclave mesh status                       # makinelerin A2A durumu
+synclave backup                            # restic incremental yedek
+```
+
+Kaynaktan: `git clone <repo> && pip install -e .`. CLI'lar: `synclave`,
+`synclave-a2a` (A2A istemcisi), `synclave-worker` (görev işleyici).
+Windows adımları aşağıda ([Windows Kurulum](#windows-kurulum-h2--windows-1011));
+adım adım tam prosedür: [`docs/windows.md`](docs/windows.md).
+
+## v2.7 — 14-17 Eyl 2026: rclone güvenilirliği (retry + üç durumlu tanı)
+
+**Ölçülmüş kusur → düzeltme:** geçici bir rclone hatası (yük altında fork/exec
+gecikmesi, AV taraması, anlık rc≠0) "rclone yok" sanılıp GDrive kanalı
+**sessizce** kapanıyordu; ayrıca pipeline (`rclone lsd … | wc -l`) rc'yi
+`wc`/`tail`'den aldığı için gerçek rc kayboluyor ve retry hiç tetiklenmiyordu.
+
+- **Retry politikası:** yalnız **idempotent OKUMA** alt-komutları (`cat`, `lsf`,
+  `lsjson`, `lsd`, `status`, `ping`, `listremotes`, `direxists`, `about`,
+  `version`) geçici hatada **1 kez** yeniden denenir (3s bekleme). **Yazma
+  komutlarına (copy/copyto/moveto/move/sync/delete/serve/mount/…) ASLA retry
+  YOK** — çift yazma ve kısmi durum riski fail-closed korunur. Yazma veto'su
+  okuma sınıflandırmasından ÖNCE gelir; bu yüzden konumsal argümanı okuma
+  sözcüğü olan bir mutasyon da retry almaz (`rclone moveto cat <dest>` RED).
+  İki modülün (`sync_motor`, `sync_common_knowledge`) okuma kümesi birebir aynı
+  olmak zorundadır (drift kapısı).
+- **Zaman aşımı:** veri okumaları 180s; erişilebilirlik yoklaması 60s
+  (retry ile en kötü durum ~123s). Yoklamayı kısaltmak yanlış "rclone yok"
+  negatifini geri getireceği için bilinçli olarak kısaltılmadı.
+- **Üç durumlu tanı:** `rclone_durum()` → `ok` | `yok` (kalıcı: binary yok,
+  rc=127, "no such file") | `belirsiz` (geçici: retry tükendi, ağ işareti).
+  Karar değişmezi aynı: `ok` değilse GDrive işlemi **atlanır, yazma yapılmaz**
+  (fail-closed); ayrım yalnız tanı içindir — `doctor` artık "GDrive remote YOK"
+  demek yerine "sorgulanamadı" diyebilir.
+- **Log biçimi:** `sync hata: <komut> rc=<rc> <süre>s retry=<n>` — komut, rc,
+  süre ve retry sayısı tek satırda.
+- **Kapılar:** `tests/test_retry.py` (okuma/yazma sınıflandırma ayrımı, konumsal
+  okuma sözcüğü yazmayı retry ettirmez, iki sınıflandırıcı birebir eşit).
+
 ## v2.3 — 30 Ağu 2026: Kriptografik Kimlik + Şifreli Mesh + Sohbet Köprüsü
 
 **Yeni yetenekler (bu sürümde):**
@@ -214,6 +259,17 @@ Windows notları:
 
 ## Geçmiş
 
+- v2.7 (14-17 Eyl 2026): rclone retry + üç durumlu tanı, retention kapıları,
+  build kilidi, audit log yolu tek kaynak, Windows kurulumu düzeltmesi
+- v2.6 (12-13 Eyl 2026): Windows ajan kilidi + platform geçici dizinleri,
+  retry sınıflandırıcısı ve veto kümesi (ölçülmüş fail-open kapatıldı)
+- v2.5 (11-12 Eyl 2026): kopya paritesi (tek kanonik motor + sapma kapısı),
+  kilit bütünlüğü, retry politikası iki sınıflandırıcıda hizalandı
+- v2.3.2 (10 Eyl 2026): rclone OKUMA retry kapsamı tamamlandı
+- v2.3 (30 Ağu 2026): kriptografik kimlik + şifreli A2A mesh + sohbet köprüsü
+- v2.1 (29 Ağu 2026): ajan mesh (A2A) + restic + akıllı kurulum
 - v1.6 (12 Ağu): akıllı kurulum (probe/propose/apply)
 - v1.3 (3 Ağu): evrensel — kullanıcı/makine kimliği, sınırsız node, share
 - v1.0 (3 Ağu): GitHub manifest + GDrive versiyonlu + OpenClaw skill
+
+Düzeltme gerekçeleri ve ölçümleri (2.5.0 → 2.7.9): [`CHANGELOG.md`](CHANGELOG.md).
