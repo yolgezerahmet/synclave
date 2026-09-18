@@ -22,13 +22,24 @@ Kapı üç şeyi zorlar:
      ve `rclone version` / `restic version` doğrulamasını içerir.
   3. Windows bölümü A2A token + uvicorn + restic serve + ilk senkron adımlarını
      içerir (kurulumun UÇTAN UCA çalışması için zorunlu adımlar).
+  4. (18 Eyl 2026) README'nin BEYAN ETTİĞİ sürüm pyproject ile uyumlu olmalı —
+     hem bu depoda hem (erişilebilirse) ikiz depoda. ÖLÇÜLMÜŞ kusur: ikiz
+     README'de `pip install synclave==2.4.0` yazıyordu ama kod 2.7.9'du; readme'yi
+     izleyen kullanıcı ESKİ sürümü kurardı (pin, resolver'ın "en yükseği seç"
+     davranışını da devre dışı bırakır). Sürüm beyanı hiçbir kapıya bağlı
+     değildi; bu iki test onu pyproject'e bağlar (boş küme geçmez — kapı
+     işlevsizleşemez).
 """
+import os
 import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 README = REPO / "README.md"
 WINDOWS_DOC = REPO / "docs" / "windows.md"
+# İkiz (private) depo — erişilemezse ilgili test SKIP eder (CI'da /root başka
+# kullanıcıya ait olabilir; pathlib orada PermissionError yükseltir).
+IKIZ_REPO = Path("/root/cumulus-sync-motor")
 
 # pip ile kurulamayacak Go binary'leri (PyPI'da aynı adlı tuzak paketler var).
 PIP_YASAK = ("rclone", "restic")
@@ -158,3 +169,73 @@ def test_windows_doc_pip_tuzagini_restic_icin_de_yaziyor():
     assert m, "docs/windows.md restic bölümü bulunamadı"
     assert "pip değil" in m.group(0).lower(), \
         "restic bölümünde pip uyarısı eksik"
+
+
+def _pyproject_surumu(pyproject: Path) -> str:
+    metin = pyproject.read_text(encoding="utf-8")
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', metin)
+    assert m, f"{pyproject}: [project] version bulunamadı"
+    return m.group(1)
+
+
+def _pinler(metin: str) -> list:
+    """`pip install synclave==X.Y.Z` pinleri."""
+    return re.findall(r"pip\s+install\s+synclave==([0-9][0-9A-Za-z.\-]*)", metin)
+
+
+def _pypi_beyanlari(metin: str) -> list:
+    """`# PyPI — v2.7.9` biçimindeki sürüm beyanları."""
+    return re.findall(r"PyPI\s*[—\-]\s*v([0-9][0-9A-Za-z.\-]*)", metin)
+
+
+def test_readme_surum_beyani_pyproject_ile_uyumlu():
+    """README'nin beyan ettiği sürüm pyproject'ten saparsa kırmızı (boş küme geçmez).
+
+    Neden (18 Eyl 2026, ÖLÇÜLMÜŞ kusur — ikiz depoda bulundu): README
+    `pip install synclave==2.4.0` diyordu, kod ise 2.7.9'du. README'yi izleyen
+    kullanıcı eski sürümü kurar; güncellemeleri almaz ve PyPI'da yeni sürüm
+    varken hata bildirir. Sürüm beyanı hiçbir kapıya bağlı değildi.
+    """
+    surum = _pyproject_surumu(REPO / "pyproject.toml")
+    metin = README.read_text(encoding="utf-8")
+
+    pinler = _pinler(metin)
+    beyanlar = _pypi_beyanlari(metin)
+    assert pinler or beyanlar, (
+        "README'de hiç sürüm beyanı bulunamadı — kapı işlevsiz (boş küme geçmez); "
+        "kurulum bloğuna `# PyPI — v<pyproject sürümü>` ekleyin"
+    )
+    kotu_pin = [p for p in pinler if p != surum]
+    assert not kotu_pin, (
+        f"README paket pini pyproject ({surum}) ile uyuşmuyor: {kotu_pin}"
+    )
+    kotu_beyan = [b for b in beyanlar if b != surum]
+    assert not kotu_beyan, (
+        f"README'nin beyan ettiği sürüm pyproject ({surum}) ile uyuşmuyor: {kotu_beyan}"
+    )
+
+
+def test_ikiz_readme_surum_beyani_kendi_pyprojecti_ile_uyumlu():
+    """İkiz (private) README pinleri kendi pyproject'i ile uyumlu olmalı.
+
+    Erişim/uyum koruması `test_ikiz_depo_paritesi` ile aynı desende: ikiz depo
+    okunamıyorsa (CI'da /root başka kullanıcıya ait olabilir) veya farklı
+    sürümdeyse SKIP — kapı yalnız gerçekten erişilebilir olduğunda hüküm verir.
+    """
+    if os.environ.get("SYNCLAVE_IKIZ_ZORUNLU", "1") == "0":
+        pytest.skip("ikiz depo kontrolü kapatıldı (SYNCLAVE_IKIZ_ZORUNLU=0)")
+    try:
+        ikiz_readme = IKIZ_REPO / "README.md"
+        if not ikiz_readme.is_file():
+            pytest.skip("ikiz depo yok (bu makinede private kopya kurulu değil)")
+        metin = ikiz_readme.read_text(encoding="utf-8")
+    except OSError as e:                    # EACCES/EPERM → ikiz depo okunamaz
+        pytest.skip(f"ikiz depo okunamadı ({e.__class__.__name__}) — kapı atlandı")
+    if "pip install synclave" not in metin:
+        pytest.skip("ikiz README'de kurulum yolu yok — kontrol kapsam dışı")
+    surum = _pyproject_surumu(IKIZ_REPO / "pyproject.toml")
+    kotu = [p for p in _pinler(metin) if p != surum]
+    kotu += [b for b in _pypi_beyanlari(metin) if b != surum]
+    assert not kotu, (
+        f"ikiz README sürüm beyanı kendi pyproject'i ({surum}) ile uyuşmuyor: {kotu}"
+    )
